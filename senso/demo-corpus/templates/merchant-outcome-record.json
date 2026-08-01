@@ -1,0 +1,20 @@
+{
+  "record_type": "merchant_outcome",
+  "correlation_id": "{{INCIDENT_CORRELATION_ID}}",
+  "merchant_id": "{{MERCHANT_ID}}",
+  "incident_type": "{{INCIDENT_TYPE}}",
+  "destination": "{{DESTINATION}}",
+  "quoted_total": "{{NUMBER}}",
+  "final_total": "{{NUMBER}}",
+  "amount_drift": "{{NUMBER}}",
+  "currency": "{{ISO_4217}}",
+  "checkout_status": "{{STATUS}}",
+  "order_id_returned": "{{BOOLEAN}}",
+  "approved_items_matched": "{{BOOLEAN}}",
+  "unexpected_addons": "{{BOOLEAN}}",
+  "delivery_promise": "{{VALUE_OR_UNKNOWN}}",
+  "delivery_actual_status": "{{NOT_VERIFIED_UNTIL_OBSERVED}}",
+  "verified_at": "{{ISO8601}}",
+  "source_event_ids": ["{{CHECKOUT_EVENT_ID}}"],
+  "confidence_boundary": "{{WHAT_THIS_RECORD_PROVES_AND_DOES_NOT_PROVE}}"
+}

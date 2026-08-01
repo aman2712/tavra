@@ -1,0 +1,31 @@
+{
+  "notice": "Synthetic sandbox catalog; never use for a production purchase",
+  "catalog_id": "boston-delayed-baggage-demo-v1",
+  "currency": "USD",
+  "candidates": [
+    {
+      "merchant_id": "demo_merchant_a",
+      "bundle_id": "bundle_a_132",
+      "quoted_total": 132.0,
+      "items": [
+        {"sku": "a-shirt-001", "category": "basic_clothing", "variant": "neutral-M", "condition": "new"},
+        {"sku": "a-trouser-001", "category": "basic_clothing", "variant": "32-inseam-required", "condition": "new"},
+        {"sku": "a-toiletry-001", "category": "toiletries", "variant": "essential-kit", "condition": "new"}
+      ],
+      "eligible": false,
+      "rejection_reason": "Delivery deadline and return terms are not verifiable"
+    },
+    {
+      "merchant_id": "demo_merchant_b",
+      "bundle_id": "bundle_b_154",
+      "quoted_total": 154.0,
+      "items": [
+        {"sku": "b-shirt-001", "category": "basic_clothing", "variant": "neutral-M", "condition": "new", "price": 54.0},
+        {"sku": "b-trouser-001", "category": "basic_clothing", "variant": "32x30-or-32x32", "condition": "new", "price": 78.0},
+        {"sku": "b-toiletry-001", "category": "toiletries", "variant": "essential-kit", "condition": "new", "price": 22.0}
+      ],
+      "eligible": true,
+      "selection_condition": "Employee confirms trouser inseam and final total remains within authorization"
+    }
+  ]
+}

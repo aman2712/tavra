@@ -1,0 +1,7 @@
+.DS_Store
+.env
+senso/demo-config/identity-map.local.json
+node_modules/
+dist/
+data/*.jsonl
+*.log

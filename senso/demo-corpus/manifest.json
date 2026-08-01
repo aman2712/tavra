@@ -1,0 +1,76 @@
+{
+  "corpus_id": "tavra-team-recovery-demo-v1",
+  "generated_for": "hackathon sandbox demonstration",
+  "production_authority": false,
+  "documents": [
+    {
+      "path": "employees/emp_demo_001.md",
+      "trust_class": "synthetic_org_authority",
+      "ingest_on_seed": true
+    },
+    {
+      "path": "policies/team-recovery-policy.md",
+      "trust_class": "synthetic_org_authority",
+      "ingest_on_seed": true
+    },
+    {
+      "path": "policies/reimbursement-evidence-policy.md",
+      "trust_class": "synthetic_org_authority",
+      "ingest_on_seed": true
+    },
+    {
+      "path": "merchants/demo-merchant-a.md",
+      "trust_class": "synthetic_demo_evidence",
+      "ingest_on_seed": true
+    },
+    {
+      "path": "merchants/demo-merchant-b.md",
+      "trust_class": "synthetic_demo_evidence",
+      "ingest_on_seed": true
+    },
+    {
+      "path": "products/boston-delayed-baggage-catalog.md",
+      "trust_class": "synthetic_demo_evidence",
+      "ingest_on_seed": true
+    },
+    {
+      "path": "products/boston-delayed-baggage-catalog.json",
+      "trust_class": "synthetic_demo_evidence",
+      "ingest_on_seed": false,
+      "note": "Structured application-side equivalent of the Markdown Senso source"
+    },
+    {
+      "path": "outcomes/demo-prior-merchant-outcome.md",
+      "trust_class": "verified_outcome",
+      "ingest_on_seed": true,
+      "note": "Synthetic prior outcome used only to demonstrate retrieval"
+    },
+    {
+      "path": "outcomes/demo-prior-merchant-outcome.json",
+      "trust_class": "verified_outcome",
+      "ingest_on_seed": false,
+      "note": "Structured application-side equivalent of the Markdown Senso source"
+    },
+    {
+      "path": "queries/retrieval-playbook.md",
+      "trust_class": "synthetic_org_authority",
+      "ingest_on_seed": false,
+      "note": "Tavra application instructions; not company knowledge"
+    },
+    {
+      "path": "templates/airline-policy-snapshot.md",
+      "trust_class": "official_external_snapshot",
+      "ingest_on_seed": false
+    },
+    {
+      "path": "templates/live-merchant-snapshot.md",
+      "trust_class": "official_external_snapshot",
+      "ingest_on_seed": false
+    },
+    {
+      "path": "templates/merchant-outcome-record.json",
+      "trust_class": "verified_outcome",
+      "ingest_on_seed": false
+    }
+  ]
+}

@@ -1,0 +1,23 @@
+{
+  "notice": "Private Tavra backend configuration. Do not ingest into Senso.",
+  "identities": [
+    {
+      "phone_e164": "REPLACE_WITH_DEMO_SENDER_PHONE_E164",
+      "company_id": "northstar_demo",
+      "employee_id": "emp_demo_001",
+      "senso_folder_id": "REPLACE_AFTER_SENSO_INGEST",
+      "employee_profile_content_id": "REPLACE_AFTER_SENSO_INGEST",
+      "allowed_policy_content_ids": [
+        "REPLACE_TEAM_POLICY_CONTENT_ID",
+        "REPLACE_EVIDENCE_POLICY_CONTENT_ID"
+      ],
+      "allowed_demo_context_content_ids": [
+        "REPLACE_MERCHANT_A_CONTENT_ID",
+        "REPLACE_MERCHANT_B_CONTENT_ID",
+        "REPLACE_CATALOG_CONTENT_ID",
+        "REPLACE_PRIOR_OUTCOME_CONTENT_ID"
+      ],
+      "status": "active"
+    }
+  ]
+}
