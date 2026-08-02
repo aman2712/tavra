@@ -3,7 +3,6 @@
   "framework": "vite",
   "buildCommand": "npm run build:landing",
   "outputDirectory": "landing-dist",
-  "public": false,
   "cleanUrls": true,
   "trailingSlash": false,
   "headers": [
