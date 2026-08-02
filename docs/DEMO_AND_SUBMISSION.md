@@ -2,8 +2,9 @@
 
 This is a recording and submission plan, not evidence that the listed features work. Check off an item only after preserving a real artifact. The supplied handbook requires a working demo, short demo video, repository or judge-access link, product explanation, Prava transaction outcome, partner-track evidence, pre-existing-work disclosure, and a summary of what worked, failed, and was learned (H2, lines 197-201; H3, lines 311-329).
 
-Repository verification on 2026-08-02: `npm test` passed 50 of 50 tests and
-`npm run build` passed. This proves local contracts and HTTP behavior, not a
+Repository verification on 2026-08-02: `npm test` passed 233 of 233 tests,
+the Swift package passed 16 tests, `npm run build` passed, and the unsigned
+physical-iPhone target build succeeded. This proves local contracts and HTTP behavior, not a
 real-device Linq delivery, live Senso/OpenAI transcript, merchant order, claim
 submission, demo recording, or Devfolio submission. Preserve those separately.
 
@@ -23,11 +24,12 @@ Keep the judged path narrow:
 - One delayed-baggage incident.
 - One image notice plus a short natural-language need.
 - One confirmed delivery address or pickup point.
-- Two merchant candidates, one rejected by traceable trust evidence.
-- One exact product option with honest images and current quote.
-- One explicit bounded authorization.
-- One successful Prava sandbox approval.
-- One truthful merchant outcome.
+- One live UCP merchant candidate with an available exact variant.
+- One exact UCP product image and address-bound current quote.
+- One offer confirmation and one address-bound estimate authorization.
+- One successful Prava approval.
+- One Browser Harness result with a real merchant order ID, or a truthful
+  failure or reconciliation state.
 - One recovery receipt and claim-ready evidence packet.
 
 Do not add another disruption type to the recorded path unless the delayed-baggage flow is repeatably complete.
@@ -36,24 +38,33 @@ Do not add another disruption type to the recorded path unless the delayed-bagga
 
 Choose one before recording and use its wording consistently.
 
-### Mode A: Real merchant sandbox or test checkout
+### Mode A: Live Prava UCP and Browser Harness checkout
 
-Use only if an actual merchant endpoint accepts the transaction and returns its own order reference.
+Use only if `TAVRA_COMMERCE_MODE=live`, the Prava MCP access gate is ready, and
+Browser Harness returns the merchant's own order reference.
 
-- Say: `Prava approval completed. The merchant accepted test order [merchant reference].`
-- Show: redacted Prava transaction evidence, merchant response/receipt, delivery or pickup status, and the recovery receipt.
+- Say: `Prava approval completed. Browser Harness placed the order and returned merchant order [merchant reference].`
+- Show: the selected UCP product and image, address-bound quote, redacted Prava
+  state timeline, merchant response, and recovery evidence.
+- If no itemized receipt was returned, show `Receipt pending`. Do not label an
+  order response as a verified receipt.
 - Do not say delivered until a merchant/carrier event proves delivery.
 
-### Mode B: Labeled commerce simulation
+### Mode B: End-to-end Prava sandbox capability check
 
-Use if the current simulated merchant adapter remains in place.
+Use while Prava production access is pending.
 
-- Say: `Prava sandbox payment approval completed. Merchant fulfillment is simulated for this demo, so no real order was placed.`
-- Show: the Prava sandbox result separately from the simulated fulfillment event.
-- Keep a visible `Simulation` label on the result and claim packet.
-- Never call a generated `SIM-*` value a merchant order ID.
+The reviewed sandbox merchant is Meddu (`https://meddu.com/`). Tavra uses the
+exact Meddu UCP image and checkout URL for the selected travel essential.
 
-Mode B is honest, but it remains a serious judging gap because the handbook says a created payment session alone is not a completed order and warns against mocked payment presented as a transaction (H2, lines 123 and 197; H3, lines 171-177 and 301-309).
+- Say: `The agent discovered a real merchant product, created a purchase-specific Prava approval, received the one-time card, and attempted checkout once. The merchant declined the sandbox card as expected, and Tavra reported that outcome back to Prava.`
+- Show: the exact UCP product image, exact address-bound AED total, Prava
+  approval, one-time-card issuance state, merchant attempt evidence, and the
+  expected test-card or insufficient-funds decline.
+- Do not claim an order, receipt, dispatch, delivery, or incurred expense.
+
+Mode B proves the complete capability Prava requires before granting production
+access; a payment session alone is not enough.
 
 ## 2 to 3 minute demo script
 
@@ -95,19 +106,31 @@ Do not record this script until each bracketed proof item exists.
 
 ### 1:05 to 1:30, discovery and trust
 
-**Visual:** Tavra sends a compact option and product media.
+**Visual:** Tavra sends one compact live-product app card.
 
-**Expected behavior:** Show exact merchant, items, sizes, itemized total, allowance, delivery estimate, substitution/return terms, and address summary. Tavra should send one adjacent, clearly illustrative image for each exact proposed line item: T-shirt, trousers, and toiletry kit. No unselected or aggregate bundle image should appear. Show why one candidate was rejected and why the selected merchant is trusted.
+**Expected behavior:** Tavra searches T-shirts first using the confirmed size,
+then toiletries if no qualifying shirt exists. It presents one available exact
+variant with the UCP merchant image. After offer approval, it shows the masked
+Prava address, subtotal, estimated shipping and tax, estimated total, quote expiry, allowance,
+and verified, late, or unverified delivery timing. No synthetic image may
+replace a missing live merchant image.
 
 **Narration:**
 
-> Senso is not just profile memory here. Verified merchant evidence changes the decision: Tavra rejects an option with stale or unverifiable delivery terms, then selects the option with current stock, returns, and delivery evidence.
+> Senso supplies identity, size, allowance, and policy context. Prava UCP is the
+> source of the live product, variant, image, and availability. The address-bound
+> quote is the source of the initial price estimate. Browser Harness verifies the
+> binding final total before it can place the order.
 
-**Evidence:** Candidate set, official source URLs/content IDs, retrieval timestamps, hashes, rejection reason, selected offer, quote timestamp, and the three mappings `b-shirt-001`, `b-trouser-001`, and `b-toiletry-001` to their exact media messages. State that the current images are illustrative synthetic-catalog media, not official merchant SKU evidence.
+**Evidence:** UCP product and variant IDs, merchant domain, image URL binding,
+Prava address ID and masked summary, quote ID and expiry, exact amount breakdown,
+selection reason, and the offer-approval event. Keep full addresses out of the
+recording.
 
 ### 1:30 to 1:55, bounded authorization and Prava
 
-**Action:** Approve the unchanged option. Open the secure Prava surface and complete the sandbox passkey/payment flow.
+**Action:** Approve the unchanged address-bound estimate. Open the Tavra card and complete
+the Prava and card-network ceremony in the Safari-controlled modal.
 
 **Expected behavior:** Before handoff, Tavra shows merchant, items, total/ceiling, delivery address summary, and what will happen. After approval, the chat updates without the user sending another message.
 
@@ -115,21 +138,32 @@ Do not record this script until each bracketed proof item exists.
 
 > I authorize this merchant, this total, and this destination. Card data and biometric verification stay inside Prava. Tavra receives only the one-time result needed for the approved action.
 
-**Evidence:** Redacted authorization record, Prava session reference, transaction reference, state sequence, report-status response, and same-chat notification event. Never show test card, CVV, OTP, raw token, dynamic CVV, passkey detail, API key, email, or phone.
+**Evidence:** Redacted offer and purchase authorization events, quote reference,
+Prava payment-session reference, state sequence, checkout idempotency key, and
+same-card and same-chat notification events. Never show a card, CVV, OTP, OAuth
+token, payment token, dynamic CVV, passkey detail, API key, email, or phone.
 
 ### 1:55 to 2:20, truthful result
 
-**Mode A expected behavior:** Display merchant-issued order reference, receipt, delivery status, and support/cancel path.
+**Mode A expected behavior:** Display the merchant-issued order reference and
+approved amount. Show receipt, dispatch, delivery, or support status only when
+the merchant actually returned that evidence.
 
-**Mode B expected behavior:** Display `Prava sandbox approval complete` and `Merchant fulfillment simulated`, with no claim of a real order.
+**Mode B expected behavior:** Display the completed approval, one-time card,
+single end-merchant attempt, expected decline, and Prava outcome report, with no
+claim of a merchant order.
 
 **Narration for Mode A:**
 
-> The merchant accepted the test order and Tavra reports the merchant's actual reference. Payment approval, order acceptance, dispatch, and delivery remain separate states.
+> Prava approved the bounded payment and Browser Harness returned the merchant's
+> actual order reference. Authorization, order, dispatch, delivery, and
+> reimbursement remain separate states.
 
 **Narration for Mode B:**
 
-> The Prava sandbox approval is real. Merchant fulfillment is a clearly labeled simulation in this build, so no real order or delivery is claimed.
+> This is Prava’s complete sandbox production gate: approval, one-time card,
+> one end-merchant checkout attempt, expected test-card decline, and outcome
+> reporting. No merchant order is claimed.
 
 **Evidence:** Merchant response if Mode A. If Mode B, simulation flag in stored case, UI, chat, and logs.
 
@@ -161,13 +195,18 @@ Do not record this script until each bracketed proof item exists.
 - [ ] Choose Mode A or Mode B and remove the other narration from the cue sheet.
 - [ ] Start from a clean demo employee and a new recovery case.
 - [ ] Use synthetic, non-personal phone, email, address, flight, and baggage details where possible.
-- [ ] Confirm all environment values point to sandbox/test systems.
+- [ ] For Mode A, run `npm run prava:link-commerce`, set
+  `TAVRA_COMMERCE_MODE=live`, and confirm `/health/commerce` is ready.
+- [ ] Confirm the intended masked Prava address exists. Do not fabricate a UAE postal code.
+- [ ] For Mode B, set `TAVRA_COMMERCE_MODE=sandbox`, confirm Playwright Chromium
+  is installed, and preserve the expected-decline chat/card evidence.
 - [ ] Confirm no API key or credential can appear in browser URL, terminal, logs, or source window.
 - [ ] Hide notifications and unrelated Messages conversations.
 - [ ] Disable password-manager and OTP previews during recording.
-- [ ] Warm the tunnel and verify health, Linq webhook, OpenAI, Senso, Prava, and merchant adapter.
-- [ ] Verify the three SKU assets return HTTP 200 at `/checkout-assets/products/b-shirt-001.png`, `/checkout-assets/products/b-trouser-001.png`, and `/checkout-assets/products/b-toiletry-001.png`.
-- [ ] Confirm the proposed item list and media captions match exactly and that `recovery-bundle.png` is not sent for the three-item option.
+- [ ] Warm the tunnel and verify liveness, commerce health, Linq webhook, OpenAI, Senso, and Prava MCP.
+- [ ] Confirm the selected UCP image resolves only through
+  `/api/prava/checkouts/{checkoutId}/products/0/image` and matches the reviewed variant.
+- [ ] Confirm the quote has not expired and the all-in total is no more than AED 250 or USD 68.
 - [ ] Run the exact script successfully twice from a clean state.
 - [ ] Have a prerecorded backup and screenshots, but be ready for a live judge run.
 
@@ -179,7 +218,8 @@ Do not record this script until each bracketed proof item exists.
 - [ ] Add captions and verify every partner name is spelled correctly: Tavra, Prava, Linq, OpenAI, Senso, Visa.
 - [ ] Avoid em dashes in Tavra chat output.
 - [ ] Do not show card number, CVV, OTP, raw token, dynamic CVV, secret, personal phone/email/address, or biometric detail.
-- [ ] Keep a visible sandbox indicator throughout the payment segment.
+- [ ] Keep a visible sandbox indicator throughout Mode B. In Mode A, show the
+  live merchant and never imply dispatch or delivery from an order result.
 - [ ] Make the final action and its evidence readable without narration.
 
 ### After recording
@@ -201,8 +241,8 @@ Create a private, redacted evidence directory or judge-access bundle. Do not com
 | OpenAI | Model/version, schema name, redacted request/response IDs, evaluation results, latency/cost | [ ] |
 | Senso | Scoped content IDs, source metadata, candidate decision trace, freshness/hash | [ ] |
 | Authorization | User confirmation event, merchant/items/amount/address scope, expiry | [ ] |
-| Prava | Environment, session/transaction references, state timeline, report-status response | [ ] |
-| Merchant | Merchant-issued test receipt and order reference, or explicit simulation record | [ ] |
+| Prava | Commerce mode, OAuth scope health, agent count, quote and payment-session references, state timeline | [ ] |
+| Merchant | UCP product and variant, merchant image binding, Browser Harness order reference, receipt or explicit receipt-pending state | [ ] |
 | Fulfillment | Delivery/pickup event or `not implemented` disclosure | [ ] |
 | Airline | Official source snapshot, packet hash, submission reference or `not submitted` state | [ ] |
 | Employer | Policy version, expense packet hash, external reference or `not submitted` state | [ ] |

@@ -28,7 +28,7 @@ test("pairs every proposed line-item caption with its own Linq media part", asyn
       lineItemDescription: "Neutral basic T-shirt, size M",
       url: "https://tavra.example/checkout-assets/products/b-shirt-001.png",
       altText: "Neutral basic T-shirt. Proposed item: size M.",
-      caption: "Neutral basic T-shirt, size M\nIllustrative sandbox image",
+      caption: "Neutral basic T-shirt, size M\nRecovery item preview",
       source: {
         kind: "synthetic_demo_asset",
         label: "Tavra synthetic demo catalog",
@@ -42,7 +42,7 @@ test("pairs every proposed line-item caption with its own Linq media part", asyn
       lineItemDescription: "Basic trousers, 32x30",
       url: "https://tavra.example/checkout-assets/products/b-trouser-001.png",
       altText: "Basic trousers. Proposed item: 32x30.",
-      caption: "Basic trousers, 32x30\nIllustrative sandbox image",
+      caption: "Basic trousers, 32x30\nRecovery item preview",
       source: {
         kind: "synthetic_demo_asset",
         label: "Tavra synthetic demo catalog",
@@ -60,7 +60,7 @@ test("pairs every proposed line-item caption with its own Linq media part", asyn
   assert.deepEqual(message?.parts, [
     {
       type: "text",
-      value: "Neutral basic T-shirt, size M\nIllustrative sandbox image",
+      value: "Neutral basic T-shirt, size M\nRecovery item preview",
     },
     {
       type: "media",
@@ -68,7 +68,7 @@ test("pairs every proposed line-item caption with its own Linq media part", asyn
     },
     {
       type: "text",
-      value: "Basic trousers, 32x30\nIllustrative sandbox image",
+      value: "Basic trousers, 32x30\nRecovery item preview",
     },
     {
       type: "media",
@@ -76,6 +76,120 @@ test("pairs every proposed line-item caption with its own Linq media part", asyn
     },
   ]);
   assert.equal(message?.idempotency_key, "tavra-media-event-1");
+});
+
+test("uploads a PDF once and sends it as a private Linq attachment", async () => {
+  const requests: Record<string, unknown>[] = [];
+  const attachmentRequests: Record<string, unknown>[] = [];
+  const uploads: Array<{
+    input: string;
+    init: RequestInit | undefined;
+  }> = [];
+  const client = {
+    attachments: {
+      async create(value: Record<string, unknown>) {
+        attachmentRequests.push(value);
+        return {
+          attachment_id: "attachment-packet-1",
+          upload_url: "https://uploads.linq.example/packet",
+          http_method: "PUT",
+          required_headers: {
+            "Content-Type": "application/pdf",
+            "Content-Length": "8",
+          },
+        };
+      },
+    },
+    chats: {
+      messages: {
+        async send(_chatId: string, value: Record<string, unknown>) {
+          requests.push(value);
+          return { message: { id: "message-packet" } };
+        },
+      },
+    },
+  } as unknown as LinqAPIV3;
+  const bytes = new TextEncoder().encode("%PDF-1.7");
+  const sender = createLinqMessageSender(client, {
+    async fetch(input, init) {
+      uploads.push({ input: String(input), init });
+      return new Response(null, { status: 200 });
+    },
+  });
+
+  const sent = await sender.sendDocument?.("chat-1", "packet-1", {
+    filename: "tavra-reimbursement-packet.pdf",
+    contentType: "application/pdf",
+    bytes,
+  });
+
+  assert.deepEqual(attachmentRequests, [
+    {
+      filename: "tavra-reimbursement-packet.pdf",
+      content_type: "application/pdf",
+      size_bytes: 8,
+    },
+  ]);
+  assert.equal(uploads[0]?.input, "https://uploads.linq.example/packet");
+  assert.equal(uploads[0]?.init?.method, "PUT");
+  assert.deepEqual(uploads[0]?.init?.headers, {
+    "Content-Type": "application/pdf",
+    "Content-Length": "8",
+  });
+  assert.deepEqual(
+    Array.from(uploads[0]?.init?.body as Uint8Array),
+    Array.from(bytes),
+  );
+  const message = requests[0]?.message as Record<string, unknown>;
+  assert.deepEqual(message.parts, [
+    { type: "media", attachment_id: "attachment-packet-1" },
+  ]);
+  assert.equal(message.preferred_service, "iMessage");
+  assert.equal(message.idempotency_key, "tavra-document-packet-1");
+  assert.deepEqual(sent, {
+    messageId: "message-packet",
+    attachmentId: "attachment-packet-1",
+  });
+});
+
+test("sends a one-time PDF through Linq's documented media URL shape", async () => {
+  const requests: Record<string, unknown>[] = [];
+  const client = {
+    chats: {
+      messages: {
+        async send(_chatId: string, value: Record<string, unknown>) {
+          requests.push(value);
+          return { message: { id: "message-document-url" } };
+        },
+      },
+    },
+  } as unknown as LinqAPIV3;
+  const bytes = new TextEncoder().encode("%PDF-1.7");
+  const sender = createLinqMessageSender(client, {
+    documentUrl: ({ eventId, filename }) =>
+      `https://tavra.example/checkout-assets/documents/${eventId}/${filename}`,
+  });
+
+  const sent = await sender.sendDocument?.("chat-1", "reimbursement-packet-checkout-1", {
+    filename: "tavra-emirates-reimbursement-packet.pdf",
+    contentType: "application/pdf",
+    bytes,
+  });
+
+  const message = requests[0]?.message as Record<string, unknown>;
+  assert.deepEqual(message.parts, [
+    {
+      type: "media",
+      url: "https://tavra.example/checkout-assets/documents/reimbursement-packet-checkout-1/tavra-emirates-reimbursement-packet.pdf",
+    },
+  ]);
+  assert.equal(message.preferred_service, "iMessage");
+  assert.equal(
+    message.idempotency_key,
+    "tavra-document-reimbursement-packet-checkout-1",
+  );
+  assert.equal(sent?.messageId, "message-document-url");
+  assert.match(sent?.attachmentId ?? "", /^url-[a-f0-9]{64}$/);
 });
 
 test("serializes a Linq iMessage app as the only message part and updates it in place", async () => {
@@ -148,8 +262,8 @@ test("serializes a Linq iMessage app as the only message part and updates it in 
     fallbackText: "Tavra approval status",
     interactive: true,
     layout: {
-      caption: "Sandbox approval complete",
-      subcaption: "No live merchant order was created",
+      caption: "Recovery approval complete",
+      subcaption: "Recovery case updated",
     },
   });
   assert.equal(updated?.messageId, "message-app-card-update");
@@ -159,8 +273,8 @@ test("serializes a Linq iMessage app as the only message part and updates it in 
     fallback_text: "Tavra approval status",
     interactive: true,
     layout: {
-      caption: "Sandbox approval complete",
-      subcaption: "No live merchant order was created",
+      caption: "Recovery approval complete",
+      subcaption: "Recovery case updated",
     },
   });
 });
@@ -179,7 +293,7 @@ test("normalizes phone handles when retrieving a shared Linq location", async ()
                   type: "Feature",
                   geometry: { type: "Point", coordinates: [-71.0589, 42.3601] },
                   properties: {
-                    handle: "+91 73187 39001",
+                    handle: "+1 202 555 0123",
                     address: "50 Park Plaza, Boston, MA 02116",
                     locality: "Boston",
                     updated_at: "2026-08-02T12:00:00Z",
@@ -195,7 +309,7 @@ test("normalizes phone handles when retrieving a shared Linq location", async ()
 
   const location = await createLinqLocationProvider(client).getCurrent(
     "chat-1",
-    "+917318739001",
+    "+12025550123",
   );
   assert.deepEqual(location, {
     address: "50 Park Plaza, Boston, MA 02116",

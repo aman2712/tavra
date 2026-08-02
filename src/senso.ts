@@ -1,9 +1,16 @@
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 
 const E164_PATTERN = /^\+[1-9]\d{7,14}$/;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const MAX_QUERY_CHARACTERS = 4_000;
 const MAX_CONTEXT_CHARACTERS = 14_000;
+const MAX_OUTCOME_FIELD_CHARACTERS = 240;
+const MAX_OUTCOME_ITEMS = 20;
+const MONEY_PATTERN = /^(?:0|[1-9]\d{0,8})(?:\.\d{1,2})?$/;
+const CURRENCY_PATTERN = /^[A-Z]{3}$/;
+const ISO_TIMESTAMP_PATTERN =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?(?:Z|[+-]\d{2}:\d{2})$/;
 
 export interface TavraIdentity {
   phoneE164: string;
@@ -34,6 +41,62 @@ export interface SensoKnowledgeProvider {
     scope: KnowledgeScope,
   ): Promise<SensoKnowledge | null>;
 }
+
+export type RecoveryOutcomeStatus =
+  | "ordered"
+  | "reimbursement_prepared"
+  | "reimbursement_submitted"
+  | "reimbursement_approved"
+  | "reimbursed";
+
+export type RecoveryReimbursementStatus =
+  | "not_started"
+  | "prepared"
+  | "submitted"
+  | "approved"
+  | "paid"
+  | "rejected";
+
+export interface SensoRecoveryOutcomeItem {
+  description: string;
+  quantity: number;
+}
+
+/**
+ * Deliberately contains no card, payment-token, CVV, or API-credential fields.
+ * The writer accepts only the minimum operational facts needed for later recovery.
+ */
+export interface SensoRecoveryOutcome {
+  recoveryCaseId: string;
+  recordedAt: string;
+  status: RecoveryOutcomeStatus;
+  airline?: string;
+  arrivalAirport?: string;
+  baggageReference?: string;
+  merchantName?: string;
+  merchantOrderId?: string;
+  items?: SensoRecoveryOutcomeItem[];
+  total?: string;
+  currency?: string;
+  reimbursementPacketId?: string;
+  reimbursementStatus?: RecoveryReimbursementStatus;
+  companyNotified?: boolean;
+}
+
+export interface RecordedSensoRecoveryOutcome {
+  employeeId: string;
+  contentId: string;
+}
+
+export interface SensoRecoveryOutcomeWriter {
+  recordRecoveryOutcome(
+    senderHandle: string,
+    outcome: SensoRecoveryOutcome,
+  ): Promise<RecordedSensoRecoveryOutcome | null>;
+}
+
+export type SensoKnowledgeService = SensoKnowledgeProvider &
+  SensoRecoveryOutcomeWriter;
 
 interface SensoSearchResult {
   content_id: string;
@@ -86,6 +149,162 @@ function uuidArray(
 function normalizePhone(value: string): string | null {
   const normalized = value.trim().replace(/[\s()-]/g, "");
   return E164_PATTERN.test(normalized) ? normalized : null;
+}
+
+function singleLineOutcomeField(
+  value: string,
+  label: string,
+  maximumLength = MAX_OUTCOME_FIELD_CHARACTERS,
+): string {
+  const trimmed = value.trim();
+  if (!trimmed || trimmed.length > maximumLength || /[\r\n\0]/.test(trimmed)) {
+    throw new Error(`${label} must be a non-empty single-line string`);
+  }
+  return trimmed;
+}
+
+function markdownValue(value: string): string {
+  return value.replace(/([\\`*_[\]<>])/g, "\\$1");
+}
+
+function validateRecoveryOutcome(outcome: SensoRecoveryOutcome): SensoRecoveryOutcome {
+  const validStatuses = new Set<RecoveryOutcomeStatus>([
+    "ordered",
+    "reimbursement_prepared",
+    "reimbursement_submitted",
+    "reimbursement_approved",
+    "reimbursed",
+  ]);
+  const validReimbursementStatuses = new Set<RecoveryReimbursementStatus>([
+    "not_started",
+    "prepared",
+    "submitted",
+    "approved",
+    "paid",
+    "rejected",
+  ]);
+  const recordedAt = singleLineOutcomeField(outcome.recordedAt, "recordedAt", 64);
+  if (!ISO_TIMESTAMP_PATTERN.test(recordedAt) || !Number.isFinite(Date.parse(recordedAt))) {
+    throw new Error("recordedAt must be an ISO-8601 timestamp");
+  }
+  if (!validStatuses.has(outcome.status)) {
+    throw new Error("status is not a supported recovery outcome");
+  }
+  if (
+    outcome.reimbursementStatus !== undefined &&
+    !validReimbursementStatuses.has(outcome.reimbursementStatus)
+  ) {
+    throw new Error("reimbursementStatus is not supported");
+  }
+  if ((outcome.total === undefined) !== (outcome.currency === undefined)) {
+    throw new Error("total and currency must be provided together");
+  }
+  if (outcome.total !== undefined && !MONEY_PATTERN.test(outcome.total)) {
+    throw new Error("total must be a non-negative decimal string with at most two decimals");
+  }
+  if (outcome.currency !== undefined && !CURRENCY_PATTERN.test(outcome.currency)) {
+    throw new Error("currency must be an uppercase three-letter code");
+  }
+  if (outcome.items !== undefined && !Array.isArray(outcome.items)) {
+    throw new Error("items must be an array");
+  }
+  if (outcome.items && outcome.items.length > MAX_OUTCOME_ITEMS) {
+    throw new Error(`items must contain at most ${MAX_OUTCOME_ITEMS} entries`);
+  }
+  if (
+    outcome.companyNotified !== undefined &&
+    typeof outcome.companyNotified !== "boolean"
+  ) {
+    throw new Error("companyNotified must be a boolean");
+  }
+
+  const normalized: SensoRecoveryOutcome = {
+    recoveryCaseId: singleLineOutcomeField(
+      outcome.recoveryCaseId,
+      "recoveryCaseId",
+      120,
+    ),
+    recordedAt,
+    status: outcome.status,
+  };
+  const optionalFields = [
+    "airline",
+    "arrivalAirport",
+    "baggageReference",
+    "merchantName",
+    "merchantOrderId",
+    "reimbursementPacketId",
+  ] as const;
+  for (const field of optionalFields) {
+    if (outcome[field] !== undefined) {
+      normalized[field] = singleLineOutcomeField(outcome[field], field);
+    }
+  }
+  if (outcome.items !== undefined) {
+    normalized.items = outcome.items.map((item, index) => {
+      if (!Number.isSafeInteger(item.quantity) || item.quantity < 1 || item.quantity > 99) {
+        throw new Error(`items[${index}].quantity must be an integer from 1 to 99`);
+      }
+      return {
+        description: singleLineOutcomeField(
+          item.description,
+          `items[${index}].description`,
+        ),
+        quantity: item.quantity,
+      };
+    });
+  }
+  if (outcome.total !== undefined && outcome.currency !== undefined) {
+    normalized.total = outcome.total;
+    normalized.currency = outcome.currency;
+  }
+  if (outcome.reimbursementStatus !== undefined) {
+    normalized.reimbursementStatus = outcome.reimbursementStatus;
+  }
+  if (outcome.companyNotified !== undefined) {
+    normalized.companyNotified = outcome.companyNotified;
+  }
+  return normalized;
+}
+
+function formatRecoveryOutcomeMarkdown(
+  identity: TavraIdentity,
+  outcome: SensoRecoveryOutcome,
+): string {
+  const rows = [
+    "# Tavra recovery outcome",
+    "",
+    `- Company: ${markdownValue(identity.companyId)}`,
+    `- Employee: ${markdownValue(identity.employeeId)}`,
+    `- Recovery case: ${markdownValue(outcome.recoveryCaseId)}`,
+    `- Recorded at: ${markdownValue(outcome.recordedAt)}`,
+    `- Outcome: ${markdownValue(outcome.status)}`,
+  ];
+  const optionalRows: Array<[string, string | undefined]> = [
+    ["Airline", outcome.airline],
+    ["Arrival airport", outcome.arrivalAirport],
+    ["Baggage reference", outcome.baggageReference],
+    ["Merchant", outcome.merchantName],
+    ["Merchant order", outcome.merchantOrderId],
+    ["Reimbursement packet", outcome.reimbursementPacketId],
+    ["Reimbursement status", outcome.reimbursementStatus],
+  ];
+  for (const [label, value] of optionalRows) {
+    if (value !== undefined) rows.push(`- ${label}: ${markdownValue(value)}`);
+  }
+  if (outcome.total !== undefined && outcome.currency !== undefined) {
+    rows.push(`- Total: ${markdownValue(outcome.currency)} ${markdownValue(outcome.total)}`);
+  }
+  if (outcome.companyNotified !== undefined) {
+    rows.push(`- Company notified: ${outcome.companyNotified ? "yes" : "no"}`);
+  }
+  if (outcome.items?.length) {
+    rows.push("", "## Items");
+    for (const item of outcome.items) {
+      rows.push(`- ${item.quantity} x ${markdownValue(item.description)}`);
+    }
+  }
+  return `${rows.join("\n")}\n`;
 }
 
 export function createIdentityResolver(value: unknown): IdentityResolver {
@@ -194,13 +413,36 @@ export function createSensoKnowledgeProvider(options: {
   identityResolver: IdentityResolver;
   fetch?: typeof fetch;
   timeoutMs?: number;
-}): SensoKnowledgeProvider {
+  pollIntervalMs?: number;
+  findAttempts?: number;
+  processingAttempts?: number;
+  sleep?: (milliseconds: number) => Promise<void>;
+}): SensoKnowledgeService {
   const baseUrl = new URL(options.baseUrl);
   if (baseUrl.protocol !== "https:") {
     throw new Error("SENSO_BASE_URL must use HTTPS");
   }
   const fetchImpl = options.fetch ?? fetch;
   const timeoutMs = options.timeoutMs ?? 15_000;
+  const pollIntervalMs = options.pollIntervalMs ?? 1_000;
+  const findAttempts = options.findAttempts ?? 30;
+  const processingAttempts = options.processingAttempts ?? 90;
+  const sleep =
+    options.sleep ??
+    ((milliseconds: number) =>
+      new Promise<void>((resolveWait) => setTimeout(resolveWait, milliseconds)));
+  if (pollIntervalMs < 0 || findAttempts < 1 || processingAttempts < 1) {
+    throw new Error("Senso polling options must be positive");
+  }
+  const outcomeContentIdsByEmployee = new Map<string, Set<string>>();
+
+  function employeeAllowlistKey(identity: TavraIdentity): string {
+    return `${identity.companyId}\0${identity.employeeId}`;
+  }
+
+  function recoveryOutcomeContentIds(identity: TavraIdentity): string[] {
+    return [...(outcomeContentIdsByEmployee.get(employeeAllowlistKey(identity)) ?? [])];
+  }
 
   async function searchScoped(
     query: string,
@@ -273,9 +515,15 @@ export function createSensoKnowledgeProvider(options: {
           20,
         );
       } else {
+        const incidentContentIds = [
+          ...new Set([
+            ...identity.allowedDemoContextContentIds,
+            ...recoveryOutcomeContentIds(identity),
+          ]),
+        ];
         contentIds = [
           ...profileAndPolicyIds,
-          ...identity.allowedDemoContextContentIds,
+          ...incidentContentIds,
         ];
         const [profileAndPolicyResults, incidentResults] = await Promise.all([
           searchScoped(
@@ -289,7 +537,7 @@ export function createSensoKnowledgeProvider(options: {
           ),
           searchScoped(
             `Incident-specific merchant, product, and prior-outcome evidence for: ${message.slice(0, MAX_QUERY_CHARACTERS)}`,
-            identity.allowedDemoContextContentIds,
+            incidentContentIds,
             12,
           ),
         ]);
@@ -305,6 +553,152 @@ export function createSensoKnowledgeProvider(options: {
         context: formatContext(results),
         contentIds,
       };
+    },
+
+    async recordRecoveryOutcome(senderHandle, rawOutcome) {
+      const identity = options.identityResolver.resolve(senderHandle);
+      if (!identity) return null;
+
+      const outcome = validateRecoveryOutcome(rawOutcome);
+      const source = new TextEncoder().encode(
+        formatRecoveryOutcomeMarkdown(identity, outcome),
+      );
+      const filenameFingerprint = createHash("sha256")
+        .update(identity.companyId)
+        .update("\0")
+        .update(identity.employeeId)
+        .update("\0")
+        .update(outcome.recoveryCaseId)
+        .update("\0")
+        .update(outcome.recordedAt)
+        .digest("hex")
+        .slice(0, 20);
+      const filename = `tavra-recovery-outcome-${filenameFingerprint}.md`;
+      const uploadRequest = await fetchImpl(new URL("org/kb/upload", baseUrl), {
+        method: "POST",
+        headers: {
+          "X-API-Key": options.apiKey,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          files: [
+            {
+              filename,
+              file_size_bytes: source.byteLength,
+              content_type: "text/markdown",
+              content_hash_md5: createHash("md5").update(source).digest("hex"),
+            },
+          ],
+        }),
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      if (!uploadRequest.ok) {
+        throw new Error(
+          `Senso outcome upload preparation failed with HTTP ${uploadRequest.status}`,
+        );
+      }
+      const uploadRoot = asRecord(
+        await uploadRequest.json(),
+        "Senso outcome upload response",
+      );
+      if (!Array.isArray(uploadRoot.results) || uploadRoot.results.length !== 1) {
+        throw new Error("Senso outcome upload preparation returned an invalid response");
+      }
+      const upload = asRecord(
+        uploadRoot.results[0],
+        "Senso outcome upload response.results[0]",
+      );
+      const contentId = requiredString(upload, "content_id", "Senso outcome upload");
+      if (!UUID_PATTERN.test(contentId)) {
+        throw new Error("Senso outcome upload returned an invalid content ID");
+      }
+      const uploadUrlValue = requiredString(upload, "upload_url", "Senso outcome upload");
+      let uploadUrl: URL;
+      try {
+        uploadUrl = new URL(uploadUrlValue);
+      } catch {
+        throw new Error("Senso outcome upload returned an invalid upload URL");
+      }
+      if (uploadUrl.protocol !== "https:") {
+        throw new Error("Senso outcome upload URL must use HTTPS");
+      }
+
+      const objectUpload = await fetchImpl(uploadUrl, {
+        method: "PUT",
+        headers: { "Content-Type": "text/markdown" },
+        body: source,
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      if (!objectUpload.ok) {
+        throw new Error(`Senso outcome source upload failed with HTTP ${objectUpload.status}`);
+      }
+
+      let nodeId: string | null = null;
+      for (let attempt = 0; attempt < findAttempts && !nodeId; attempt += 1) {
+        const found = await fetchImpl(
+          new URL(`org/kb/find?q=${encodeURIComponent(filename)}`, baseUrl),
+          {
+            headers: { "X-API-Key": options.apiKey },
+            signal: AbortSignal.timeout(timeoutMs),
+          },
+        );
+        if (found.ok) {
+          const foundRoot = asRecord(await found.json(), "Senso outcome find response");
+          if (!Array.isArray(foundRoot.nodes)) {
+            throw new Error("Senso outcome find response.nodes must be an array");
+          }
+          for (const [index, rawNode] of foundRoot.nodes.entries()) {
+            const node = asRecord(rawNode, `Senso outcome find response.nodes[${index}]`);
+            if (node.content_id !== contentId) continue;
+            nodeId = requiredString(node, "kb_node_id", "Senso outcome node");
+            break;
+          }
+        } else if (found.status !== 404 && found.status !== 202) {
+          throw new Error(`Senso outcome lookup failed with HTTP ${found.status}`);
+        }
+        if (!nodeId && attempt + 1 < findAttempts) await sleep(pollIntervalMs);
+      }
+      if (!nodeId) throw new Error("Senso did not expose the recovery outcome in time");
+
+      let completed = false;
+      for (let attempt = 0; attempt < processingAttempts; attempt += 1) {
+        const statusResponse = await fetchImpl(
+          new URL(`org/kb/nodes/${encodeURIComponent(nodeId)}/content`, baseUrl),
+          {
+            headers: { "X-API-Key": options.apiKey },
+            signal: AbortSignal.timeout(timeoutMs),
+          },
+        );
+        if (!statusResponse.ok) {
+          throw new Error(
+            `Senso outcome processing status failed with HTTP ${statusResponse.status}`,
+          );
+        }
+        const statusRoot = asRecord(
+          await statusResponse.json(),
+          "Senso outcome processing response",
+        );
+        const processingStatus =
+          typeof statusRoot.processing_status === "string"
+            ? statusRoot.processing_status.toLowerCase()
+            : "";
+        if (processingStatus === "complete" || processingStatus === "completed") {
+          completed = true;
+          break;
+        }
+        if (processingStatus === "failed" || processingStatus === "error") {
+          throw new Error("Senso failed to process the recovery outcome");
+        }
+        if (attempt + 1 < processingAttempts) await sleep(pollIntervalMs);
+      }
+      if (!completed) throw new Error("Senso recovery outcome processing timed out");
+
+      const employeeKey = employeeAllowlistKey(identity);
+      const employeeContentIds =
+        outcomeContentIdsByEmployee.get(employeeKey) ?? new Set<string>();
+      employeeContentIds.add(contentId);
+      outcomeContentIdsByEmployee.set(employeeKey, employeeContentIds);
+      return { employeeId: identity.employeeId, contentId };
     },
   };
 }

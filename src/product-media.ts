@@ -60,6 +60,69 @@ export interface ProductMediaResolver {
   resolve(products: readonly PravaProduct[]): ProductMediaResolution;
 }
 
+export interface OfficialMerchantProductMediaInput {
+  productRef: string;
+  lineItemDescription: string;
+  imageUrl: string;
+  imageDescription?: string | null;
+  merchantName: string;
+  /**
+   * The caller must bind this URL to the selected catalog response. This hook
+   * lets production additionally enforce a provider or merchant allowlist.
+   */
+  mediaUrlAllowed?: (url: URL, productRef: string) => boolean;
+}
+
+/**
+ * Builds presentation metadata from an exact live-catalog image. URLs are
+ * never invented or repaired here: invalid or untrusted catalog media is
+ * suppressed so callers can continue with a truthful text-only review.
+ */
+export function createOfficialMerchantProductMedia(
+  input: OfficialMerchantProductMediaInput,
+): ResolvedProductMedia | null {
+  const productRef = input.productRef.trim();
+  const lineItemDescription = input.lineItemDescription.replace(/\s+/g, " ").trim();
+  const merchantName = input.merchantName.replace(/\s+/g, " ").trim();
+  if (
+    !SAFE_PRODUCT_REF.test(productRef) ||
+    !lineItemDescription ||
+    !merchantName
+  ) {
+    return null;
+  }
+  let url: URL;
+  try {
+    url = new URL(input.imageUrl);
+  } catch {
+    return null;
+  }
+  if (
+    url.protocol !== "https:" ||
+    url.username ||
+    url.password ||
+    (input.mediaUrlAllowed && !input.mediaUrlAllowed(url, productRef))
+  ) {
+    return null;
+  }
+  const imageDescription =
+    input.imageDescription?.replace(/\s+/g, " ").trim() ||
+    `Official product image from ${merchantName}`;
+  return {
+    productRef,
+    lineItemDescription,
+    url: url.toString(),
+    altText: `${imageDescription}. Proposed item: ${lineItemDescription}.`,
+    caption: `${lineItemDescription}\n${merchantName}`,
+    source: {
+      kind: "official_merchant_asset",
+      label: merchantName,
+      assetFilename: null,
+      mediaUrl: url.toString(),
+    },
+  };
+}
+
 /**
  * Linq's transcript card accepts one hero image. Use the complete demo bundle
  * only when every selected line item is backed by the synthetic demo catalog.
@@ -70,6 +133,10 @@ export function resolveCheckoutCardMedia(
   products: readonly PravaProduct[],
 ): ResolvedProductMedia[] {
   const lineItems = resolver.resolve(products);
+  const officialMerchantItem = lineItems.items.find(
+    (item) => item.source.kind === "official_merchant_asset",
+  );
+  if (officialMerchantItem) return [officialMerchantItem];
   if (!lineItems.complete) return [];
   if (
     lineItems.items.length > 1 &&
@@ -181,10 +248,27 @@ export function createProductMediaResolver(options: {
         }
         const definition = assets.get(productRef);
         if (!definition) {
+          const official =
+            product.imageUrl && product.merchantName
+              ? createOfficialMerchantProductMedia({
+                  productRef,
+                  lineItemDescription: product.description,
+                  imageUrl: product.imageUrl,
+                  merchantName: product.merchantName,
+                  mediaUrlAllowed: options.liveMediaUrlAllowed,
+                })
+              : null;
+          if (official) {
+            items.push(official);
+            continue;
+          }
           missing.push({
             productRef,
             lineItemDescription: product.description,
-            reason: "unmapped_product_ref",
+            reason:
+              product.imageUrl && product.merchantName
+                ? "untrusted_media_url"
+                : "unmapped_product_ref",
           });
           continue;
         }
@@ -222,7 +306,7 @@ export function createProductMediaResolver(options: {
         const url = mediaUrl.toString();
         const disclosure =
           definition.sourceKind === "synthetic_demo_asset"
-            ? "Illustrative sandbox image"
+            ? "Recovery item preview"
             : definition.sourceLabel;
         items.push({
           productRef,

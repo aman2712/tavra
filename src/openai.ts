@@ -1,30 +1,52 @@
 import OpenAI from "openai";
 import { randomUUID } from "node:crypto";
 
+import type { AirlineClaimSubmissionProvider } from "./airline-claim.js";
 import type {
   InboundAttachment,
   ReplyGenerator,
   ReplyPresentation,
+  ReplyTurnContext,
 } from "./message-reply.js";
 import {
   createCheckoutIMessageAppCard,
   type IMessageAppIdentity,
 } from "./imessage-app.js";
 import {
+  normalizeCommerceAmount,
+  type CommerceAddress,
+  type CommerceMoney,
+  type CommerceQuote,
+} from "./commerce.js";
+import type {
+  LiveCommerceService,
+  PreparedLiveCommerceOffer,
+} from "./live-commerce.js";
+import {
   linqLocationErrorDetails,
   type LinqLocationProvider,
+  type SharedChatLocation,
 } from "./linq.js";
 import { sameLinqHandle } from "./linq-events.js";
 import type {
   RecoveryCaseLedger,
   RecoveryCaseRecord,
 } from "./recovery-case.js";
+import type { RecoveryStateStore } from "./recovery-state-store.js";
+import {
+  MEDDU_MERCHANT_CONFIG,
+  type MedduOffer,
+  type MedduUcpClient,
+  type MerchantShippingAddress,
+  type PreparedMerchantCheckout,
+} from "./sandbox-merchant.js";
 import type {
   PravaCheckoutLink,
   PravaCheckoutProvider,
   PravaProduct,
 } from "./prava.js";
 import {
+  createOfficialMerchantProductMedia,
   resolveCheckoutCardMedia,
   type ProductMediaResolver,
 } from "./product-media.js";
@@ -32,6 +54,7 @@ import type {
   KnowledgeScope,
   SensoKnowledge,
   SensoKnowledgeProvider,
+  SensoRecoveryOutcomeWriter,
 } from "./senso.js";
 
 const MAX_INPUT_CHARACTERS = 4_000;
@@ -65,6 +88,8 @@ export type RecoveryStage =
   | "awaiting_size_confirmation"
   | "awaiting_bundle_review"
   | "awaiting_delivery_address"
+  | "awaiting_live_offer_review"
+  | "awaiting_live_quote_review"
   | "awaiting_incident_details"
   | "awaiting_email_confirmation"
   | "awaiting_payment_authorization"
@@ -208,7 +233,7 @@ const RECOVERY_INTAKE_INSTRUCTIONS = [
 
 const RECOVERY_SIZE_INTAKE_INSTRUCTIONS = [
   "The employee has asked Tavra to source replacement clothing and toiletries and has supplied a destination area and deadline.",
-  "Briefly acknowledge that context, then show only the on-file T-shirt size, trouser waist, and trouser inseam as three separate • bullet lines.",
+  "Briefly acknowledge that context, then naturally say that Tavra's knowledge base has the employee's stored sizes before showing only the on-file T-shirt size, trouser waist, and trouser inseam as three separate • bullet lines.",
   "Clearly distinguish on-file values from missing values.",
   "Ask exactly one short question that confirms every on-file clothing size and asks for every missing required size.",
   "Do not claim that sourcing, searching, ordering, or any other action has started.",
@@ -225,7 +250,8 @@ const RECOVERY_OPTIONS_INSTRUCTIONS = [
   "The employee has now confirmed every required clothing size, so this is the first turn allowed to present a recovery option.",
   "Acknowledge the confirmation naturally, then present the single eligible option from company context in conversational language.",
   "Include the relevant items, confirmed sizes, quoted total, delivery estimate, and employee allowance when present.",
-  "If company context identifies a synthetic or sandbox catalog, label the quote and delivery estimate as sandbox evidence. Never present them as live inventory or a guaranteed ETA.",
+  "Do not add environment labels to the response, claim live inventory, or present an unverified delivery time as guaranteed.",
+  "If the catalog is named for a different city than the employee's requested destination, do not use that city's delivery estimate and do not ask the employee to move the order. Say delivery timing is still being confirmed for the requested destination.",
   "Format the option as a compact • bullet list with one line each for the T-shirt, trousers, toiletries, delivery, and total versus allowance.",
   "Use only evidence explicitly marked eligible after confirmation. Ignore every rejected or not-eligible candidate even if it is cheaper.",
   "Do not mention internal candidate, bundle, merchant, employee-category, policy, or source labels.",
@@ -262,6 +288,7 @@ interface RecoverySession {
   startedAt: number;
   stage: RecoveryStage;
   employeeId: string;
+  employeeAllowance: CommerceMoney | null;
   originalMessage: string;
   sizes: RecoverySizes;
   confirmed: RecoverySizeConfirmations;
@@ -270,8 +297,10 @@ interface RecoverySession {
   baggageReference: string | null;
   noticeEvidence: BaggageNoticeEvidence | null;
   noticeConfirmed: boolean;
+  noticeResumeStage?: RecoveryStage | null;
   wantsEssentials: boolean | null;
   needBy: string | null;
+  needByIso: string | null;
   deliveryArea: string | null;
   catalogAreaRequired: string | null;
   deliveryAddress: string | null;
@@ -281,8 +310,19 @@ interface RecoverySession {
   email: string | null;
   emailConfirmed: boolean;
   optionTotal: string | null;
+  optionCurrency: string;
   proposedProducts: PravaProduct[] | null;
+  sandboxMerchantOffer: MedduOffer | null;
+  sandboxMerchantCheckout: PreparedMerchantCheckout | null;
   checkout: PravaCheckoutLink | null;
+  liveAddress: CommerceAddress | null;
+  liveOffer: PreparedLiveCommerceOffer | null;
+  liveQuote: CommerceQuote | null;
+  liveRejectedVariantIds: string[];
+  liveResumeAfterIncident: boolean;
+  livePurchaseAuthorizationEventId: string | null;
+  /** Linq ID of the exact final summary that may be approved with a tapback. */
+  paymentAuthorizationMessageId: string | null;
 }
 
 export interface BaggageNoticeEvidence {
@@ -299,22 +339,91 @@ export interface BaggageNoticeEvidence {
   attachmentIds: string[];
 }
 
+function mergeBaggageNoticeEvidence(
+  session: RecoverySession,
+  evidence: BaggageNoticeEvidence,
+): void {
+  const existingAttachmentIds = session.noticeEvidence?.attachmentIds ?? [];
+  session.noticeEvidence = {
+    ...evidence,
+    attachmentIds: [
+      ...new Set([...existingAttachmentIds, ...evidence.attachmentIds]),
+    ],
+  };
+  if (!session.airline) session.airline = evidence.airline;
+  if (!session.arrivalAirport) {
+    session.arrivalAirport = evidence.arrivalAirport;
+  }
+  if (!session.baggageReference) {
+    session.baggageReference = evidence.baggageReference;
+  }
+}
+
+function recoveryUpdateFromNotice(
+  evidence: BaggageNoticeEvidence,
+): RecoveryTurnUpdate {
+  return {
+    action: "provide_incident_details",
+    confirmsOnFileSizes: false,
+    tshirtSize: null,
+    trouserWaist: null,
+    trouserInseam: null,
+    airline: evidence.airline,
+    arrivalAirport: evidence.arrivalAirport,
+    baggageReference: evidence.baggageReference,
+    wantsEssentials: null,
+    needBy: null,
+    deliveryArea: null,
+    deliveryAddress: null,
+    confirmsDeliveryAddress: false,
+  };
+}
+
 export interface RecoveryRuntimeOptions {
   locationProvider?: LinqLocationProvider;
   productMediaResolver?: ProductMediaResolver;
   caseLedger?: RecoveryCaseLedger;
   iMessageAppIdentity?: IMessageAppIdentity | null;
+  /** Enables merchant-backed UCP recovery. When absent, the explicit sandbox flow is retained. */
+  liveCommerce?: LiveCommerceService;
+  /** Public merchant UCP used for the real end-merchant sandbox validation path. */
+  sandboxMerchant?: MedduUcpClient;
+  /** Persists deterministic recovery workflow state across server restarts. */
+  recoveryStateStore?: RecoveryStateStore;
+  /** IANA timezone used to resolve employee-relative deadlines. */
+  timeZone?: string;
+  /** Injectable clock used only for deterministic deadline resolution. */
+  now?: () => Date;
+  /** Sandbox-only connector for the hackathon airline handoff demonstration. */
+  airlineClaimSubmissionProvider?: AirlineClaimSubmissionProvider;
 }
 
 export interface TavraReplyGenerator extends ReplyGenerator {
   consumePresentation(chatId: string): ReplyPresentation | null;
-  chatForLocationShare(senderHandle: string): string | null;
+  chatForLocationShare(
+    senderHandle: string,
+  ): string | null | Promise<string | null>;
   generateLocationShareReply(request: {
     chatId: string;
     senderHandle: string;
     eventAt: string;
+    turn?: ReplyTurnContext;
   }): Promise<string | null>;
-  locationSharingStopped(senderHandle: string): void;
+  locationSharingStopped(senderHandle: string): void | Promise<void>;
+  recordSentReply(request: {
+    chatId: string;
+    eventId: string;
+    messageId: string;
+    reply: string;
+  }): void | Promise<void>;
+  generateReactionReply(request: {
+    chatId: string;
+    senderHandle: string;
+    targetMessageId: string;
+    eventId: string;
+    reactedAt: string;
+    turn?: ReplyTurnContext;
+  }): Promise<string | null>;
   /** Keeps in-process dialogue state aligned with an out-of-band payment update. */
   recordExternalReply(chatId: string, reply: string): void;
 }
@@ -346,6 +455,34 @@ function limitReply(text: string): string {
   return `${reply.slice(0, MAX_REPLY_CHARACTERS - 1).trimEnd()}…`;
 }
 
+function safeCheckoutFailure(error: unknown): string {
+  const source =
+    error && typeof error === "object"
+      ? (error as { code?: unknown; message?: unknown })
+      : null;
+  const code =
+    typeof source?.code === "string" &&
+    /^[A-Za-z0-9_.:-]{2,80}$/.test(source.code.trim())
+      ? source.code.trim()
+      : null;
+  const rawMessage =
+    typeof source?.message === "string"
+      ? source.message
+      : error instanceof Error
+        ? error.message
+        : "Prava checkout creation failed";
+  const message = rawMessage
+    .replace(/\b(?:pk|sk)_(?:test|live)_[A-Za-z0-9_-]+\b/g, "[redacted-key]")
+    .replace(/\b\d{12,19}\b/g, "[redacted-card]")
+    .replace(/\b(?:dynamic[_ -]?cvv|cvv|security code)\s*[:=]?\s*\d{3,4}\b/gi, "[redacted-security-code]")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 300);
+  return code && !message.toLowerCase().includes(code.toLowerCase())
+    ? `${code}: ${message}`
+    : message;
+}
+
 function fastIntent(message: string): TavraIntent | null {
   const normalized = message.trim().toLowerCase();
   if (
@@ -359,11 +496,117 @@ function fastIntent(message: string): TavraIntent | null {
   return null;
 }
 
+const PRIVATE_DELIVERY_ADDRESS_PLACEHOLDER = "[delivery address omitted]";
+
+function isPrivateDeliveryAddressPlaceholder(
+  value: string | null | undefined,
+): boolean {
+  return value?.trim().toLowerCase() ===
+    PRIVATE_DELIVERY_ADDRESS_PLACEHOLDER.toLowerCase();
+}
+
+function isUsableDeliveryAddress(
+  value: string | null | undefined,
+): value is string {
+  return Boolean(value?.trim() && !isPrivateDeliveryAddressPlaceholder(value));
+}
+
+const PRIVATE_STREET_ADDRESS_PATTERN =
+  /\b\d{1,6}\s+[A-Za-z0-9.'-]+(?:\s+[A-Za-z0-9.'-]+){0,6}\s+(?:street|st\.?|road|rd\.?|avenue|ave\.?|drive|dr\.?|lane|ln\.?|boulevard|blvd\.?|highway|hwy\.?|parkway|pkwy\.?|way)\b/i;
+
+function containsLikelyPrivateDeliveryAddress(value: string): boolean {
+  if (PRIVATE_STREET_ADDRESS_PATTERN.test(value)) return true;
+  if (
+    /\b(?:deliver|send|ship|drop(?:ped)? off|address|location)\b.{0,120}\b(?:hotel|inn|resort|suites?|lodge|front desk|university|campus|office|building|room|unit|floor)\b/i.test(
+      value,
+    )
+  ) {
+    return true;
+  }
+  if (
+    /\b(?:at|to)\s+[^.!?\n]{2,100}\b(?:hotel|inn|resort|suites?|lodge|front desk|university|campus|office|building)\b/i.test(
+      value,
+    ) ||
+    /\b(?:hotel|inn|resort|suites?|lodge|front desk|university|campus|office|building)\b[^.!?\n]{0,100},\s*[^.!?\n]{2,80}/i.test(
+      value,
+    )
+  ) {
+    return true;
+  }
+  return (
+    (value.match(/,/g)?.length ?? 0) >= 2 &&
+    /\b(?:city|district|downtown|airport|terminal|abu dhabi|dubai|boston|new york|uae|united arab emirates)\b/i.test(
+      value,
+    )
+  );
+}
+
+function replaceKnownPrivateDeliveryAddress(
+  value: string,
+  address: string,
+): string {
+  const parts = address.trim().split(/\s+/).filter(Boolean);
+  if (parts.length === 0) return value;
+  return value.replace(
+    new RegExp(parts.map(escapeRegExp).join("\\s+"), "gi"),
+    PRIVATE_DELIVERY_ADDRESS_PLACEHOLDER,
+  );
+}
+
+/** Removes typed or shared delivery-address text before it reaches OpenAI. */
+export function redactPrivateDeliveryContextForOpenAI(
+  value: string,
+  knownDeliveryAddresses: readonly (string | null | undefined)[] = [],
+): string {
+  let redacted = value;
+  for (const address of knownDeliveryAddresses) {
+    if (address?.trim()) {
+      redacted = replaceKnownPrivateDeliveryAddress(redacted, address);
+    }
+  }
+  return redacted
+    .split("\n")
+    .map((line) => {
+      if (
+        line.includes(PRIVATE_DELIVERY_ADDRESS_PLACEHOLDER) ||
+        !containsLikelyPrivateDeliveryAddress(line)
+      ) {
+        return line;
+      }
+      const fragments = line.match(/[^.!?]+[.!?]?/g) ?? [line];
+      return fragments
+        .map((fragment) => {
+          if (!containsLikelyPrivateDeliveryAddress(fragment)) return fragment;
+          const incident = /\b(?:bag|baggage|luggage)\b.{0,50}\b(?:delay|delayed|missing|lost)\b|\b(?:delay|delayed|missing|lost)\b.{0,50}\b(?:bag|baggage|luggage)\b/i.test(
+            fragment,
+          );
+          const deadline = fragment.match(
+            /\b(?:by|before)\s+\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?)?(?:\s+(?:today|tomorrow))?\b/i,
+          )?.[0];
+          return [
+            incident ? "Baggage disruption reported." : "",
+            PRIVATE_DELIVERY_ADDRESS_PLACEHOLDER,
+            deadline ? `Requested ${deadline}.` : "",
+          ]
+            .filter(Boolean)
+            .join(" ");
+        })
+        .join(" ");
+    })
+    .join("\n");
+}
+
 function formatConversation(history: ConversationTurn[], message: string): string {
   const previous = history
-    .map((turn) => `${turn.role === "user" ? "Employee" : "Tavra"}: ${turn.text}`)
+    .map(
+      (turn) =>
+        `${turn.role === "user" ? "Employee" : "Tavra"}: ${redactPrivateDeliveryContextForOpenAI(turn.text)}`,
+    )
     .join("\n");
-  return [previous && `Recent conversation:\n${previous}`, `Current iMessage:\n${message}`]
+  return [
+    previous && `Recent conversation:\n${previous}`,
+    `Current iMessage:\n${redactPrivateDeliveryContextForOpenAI(message)}`,
+  ]
     .filter(Boolean)
     .join("\n\n")
     .slice(-MAX_INPUT_CHARACTERS * 2);
@@ -745,13 +988,134 @@ function explicitRecoveryContext(message: string): {
   const time = message.match(
     /\b(?:by|before|at)\s+(\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?))\b/i,
   )?.[1];
+  const relativeDay = message.match(/\b(today|tomorrow)\b/i)?.[1];
   const city = message.match(
     /\b(?:in|to)\s+([A-Z][A-Za-z.'-]+(?:\s+[A-Z][A-Za-z.'-]+){0,2})(?=[,.!?]|\s+(?:by|before|at|for|tomorrow|today|tonight)\b|$)/,
   )?.[1];
   return {
     deliveryArea: city ? cleanWorkflowValue(city) : null,
-    needBy: time ? `before ${cleanWorkflowValue(time)}` : null,
+    needBy: time
+      ? `before ${cleanWorkflowValue(time)}${relativeDay ? ` ${relativeDay.toLowerCase()}` : ""}`
+      : null,
   };
+}
+
+interface ZonedDateTimeParts {
+  year: number;
+  month: number;
+  day: number;
+  hour: number;
+  minute: number;
+  second: number;
+}
+
+function zonedDateTimeParts(date: Date, timeZone: string): ZonedDateTimeParts {
+  const values = Object.fromEntries(
+    new Intl.DateTimeFormat("en-CA", {
+      timeZone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hourCycle: "h23",
+    })
+      .formatToParts(date)
+      .filter((part) => part.type !== "literal")
+      .map((part) => [part.type, Number(part.value)]),
+  );
+  return values as unknown as ZonedDateTimeParts;
+}
+
+function sameZonedDateTime(
+  left: ZonedDateTimeParts,
+  right: ZonedDateTimeParts,
+): boolean {
+  return (
+    left.year === right.year &&
+    left.month === right.month &&
+    left.day === right.day &&
+    left.hour === right.hour &&
+    left.minute === right.minute
+  );
+}
+
+function zonedWallTimeToIso(
+  target: ZonedDateTimeParts,
+  timeZone: string,
+): string | null {
+  const desired = Date.UTC(
+    target.year,
+    target.month - 1,
+    target.day,
+    target.hour,
+    target.minute,
+    0,
+  );
+  let epoch = desired;
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const observed = zonedDateTimeParts(new Date(epoch), timeZone);
+    const observedAsUtc = Date.UTC(
+      observed.year,
+      observed.month - 1,
+      observed.day,
+      observed.hour,
+      observed.minute,
+      0,
+    );
+    epoch += desired - observedAsUtc;
+  }
+  if (!sameZonedDateTime(zonedDateTimeParts(new Date(epoch), timeZone), target)) {
+    return null;
+  }
+  const matchingEpochs = [epoch - 3_600_000, epoch, epoch + 3_600_000].filter(
+    (candidate) =>
+      sameZonedDateTime(zonedDateTimeParts(new Date(candidate), timeZone), target),
+  );
+  return matchingEpochs.length === 1 ? new Date(epoch).toISOString() : null;
+}
+
+export function parseRecoveryDeadlineIso(
+  value: string | null,
+  timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone,
+  now = new Date(),
+): string | null {
+  if (!value) return null;
+  if (/^\d{4}-\d{2}-\d{2}T/.test(value) && Number.isFinite(Date.parse(value))) {
+    return new Date(value).toISOString();
+  }
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone }).format(now);
+  } catch {
+    return null;
+  }
+  const relativeDay = value.match(/\b(today|tomorrow)\b/i)?.[1]?.toLowerCase();
+  const time = value.match(
+    /\b(\d{1,2})(?::(\d{2}))?\s*(a\.?m\.?|p\.?m\.?)\b/i,
+  );
+  if (!relativeDay || !time) return null;
+  let hour = Number(time[1]);
+  const minute = Number(time[2] ?? "0");
+  const meridiem = time[3]?.toLowerCase().replaceAll(".", "");
+  if (hour < 1 || hour > 12 || minute < 0 || minute > 59 || !meridiem) return null;
+  if (hour === 12) hour = 0;
+  if (meridiem === "pm") hour += 12;
+  const localNow = zonedDateTimeParts(now, timeZone);
+  const date = new Date(
+    Date.UTC(localNow.year, localNow.month - 1, localNow.day + (relativeDay === "tomorrow" ? 1 : 0)),
+  );
+  return zonedWallTimeToIso(
+    {
+      year: date.getUTCFullYear(),
+      month: date.getUTCMonth() + 1,
+      day: date.getUTCDate(),
+      hour,
+      minute,
+      second: 0,
+    },
+    timeZone,
+  );
 }
 
 const OPENAI_IMAGE_MIME_TYPES = new Set([
@@ -830,6 +1194,7 @@ async function analyzeBaggageNotice(
   model: string,
   message: string,
   attachments: InboundAttachment[],
+  knownDeliveryAddresses: readonly (string | null | undefined)[] = [],
 ): Promise<BaggageNoticeEvidence | null> {
   const images = trustedNoticeImages(attachments);
   if (images.length === 0) return null;
@@ -850,7 +1215,7 @@ async function analyzeBaggageNotice(
           {
             type: "input_text" as const,
             text: message.trim()
-              ? `User caption: ${message.trim()}`
+              ? `User caption: ${redactPrivateDeliveryContextForOpenAI(message.trim(), knownDeliveryAddresses)}`
               : "Determine whether this is baggage-disruption evidence and extract its visible facts.",
           },
           ...images.map((attachment) => ({
@@ -1021,7 +1386,19 @@ function explicitlyAuthorizesPayment(message: string): boolean {
 }
 
 function isCancellation(message: string): boolean {
-  return /^\s*(?:cancel|stop|never mind|nevermind|abort)\b/i.test(message);
+  const normalized = message
+    .trim()
+    .toLowerCase()
+    .replace(/[.!]+$/g, "")
+    .replace(/\s+/g, " ");
+  if (/^(?:please )?never ?mind(?: please)?$/.test(normalized)) return true;
+  return /^(?:please )?(?:cancel|stop)(?: (?:this|it|here|now|please|everything|for now|the (?:recovery|request|order|process)))*(?: please)?$/.test(
+    normalized,
+  );
+}
+
+async function isCurrentTurn(turn?: ReplyTurnContext): Promise<boolean> {
+  return turn ? turn.isCurrent() : true;
 }
 
 function escapeRegExp(value: string): string {
@@ -1107,6 +1484,9 @@ function recoveryIntakeIssues(reply: string, sizes: RecoverySizes): string[] {
     )
   ) {
     issues.push("begin with a brief, human acknowledgment of the confirmed context");
+  }
+  if (!/\bknowledge\s+(?:base|context)\b/i.test(reply)) {
+    issues.push("say naturally that the employee sizes come from Tavra's knowledge base");
   }
   if (
     sizes.tshirtSize &&
@@ -1205,6 +1585,21 @@ function contextAmount(context: string, label: RegExp): string | null {
   )?.[1] ?? null;
 }
 
+function extractEmployeeAllowance(context: string): CommerceMoney | null {
+  const amount = contextAmount(context, /incident allowance/i);
+  if (!amount) return null;
+  const allowanceLine =
+    context.match(/incident allowance[^\n.]{0,80}/i)?.[0] ?? "";
+  const currency = /\bAED\b/i.test(allowanceLine)
+    ? "AED"
+    : /\b(?:USD|US\s*dollars?)\b|\$/i.test(allowanceLine)
+      ? "USD"
+      : null;
+  return currency
+    ? { amount: normalizeCommerceAmount(amount), currency }
+    : null;
+}
+
 function optionEvidenceAmounts(context: string): {
   eligible: string | null;
   rejected: string[];
@@ -1281,11 +1676,20 @@ function recoveryOptionIssues(
   if (/delivery promise/i.test(knowledge.context) && !/\b(?:deliver|arriv)/i.test(reply)) {
     issues.push("include the delivery promise");
   }
-  if (
-    /synthetic sandbox catalog|demo catalog/i.test(knowledge.context) &&
-    !/\bsandbox\b/i.test(reply)
-  ) {
-    issues.push("label the quote and delivery estimate as sandbox evidence");
+  const catalogArea = sandboxCatalogArea(knowledge.context);
+  const catalogDoesNotMatchDestination = Boolean(
+    catalogArea && !sandboxCatalogMatchesDestination(catalogArea, session.deliveryArea),
+  );
+  if (catalogDoesNotMatchDestination) {
+    if (!/\b(?:being confirmed|pending|not verified|unverified)\b/i.test(reply)) {
+      issues.push("say delivery timing is still being confirmed for the requested destination");
+    }
+    if (catalogArea && new RegExp(`\\b${escapeRegExp(catalogArea)}\\b`, "i").test(reply)) {
+      issues.push(`do not redirect the employee to the ${catalogArea} sandbox city`);
+    }
+    if (/\b(?:deliver|arriv)[^\n]{0,60}\b(?:before|by)\s+\d/i.test(reply)) {
+      issues.push("remove the unrelated delivery time");
+    }
   }
   if (questionCount(reply) !== 1 || !/\b(?:change|adjust|different)\b/i.test(reply)) {
     issues.push("end with exactly one short question asking whether anything should change");
@@ -1403,17 +1807,43 @@ function mergeRecoveryUpdate(
   }
   const needBy = normalizedExtractedString(update.needBy);
   const deliveryArea = normalizedExtractedString(update.deliveryArea);
-  const deliveryAddress = normalizedExtractedString(update.deliveryAddress);
   if (needBy) session.needBy = needBy;
   if (deliveryArea) session.deliveryArea = deliveryArea;
-  if (deliveryAddress) {
+  const addressInstruction = deliveryAddressInstruction(message);
+  if (
+    session.stage === "awaiting_delivery_address" &&
+    isUsableDeliveryAddress(session.deliveryAddress) &&
+    addressInstruction &&
+    !new RegExp(`\\b${escapeRegExp(addressInstruction)}\\b`, "i").test(
+      session.deliveryAddress,
+    )
+  ) {
+    session.deliveryAddress = `${session.deliveryAddress}, ${addressInstruction}`;
+    session.deliveryAddressSource = "message";
+    session.deliveryAddressConfirmed = false;
+    session.locationRequestedAt = null;
+    session.liveRejectedVariantIds = [];
+    session.sandboxMerchantCheckout = null;
+  }
+  // Delivery addresses are intentionally removed before any model call. Use
+  // only the raw iMessage while the workflow is explicitly collecting an
+  // address, and never allow the privacy placeholder back into durable state.
+  if (
+    session.stage === "awaiting_delivery_address" &&
+    looksLikeDeliveryAddress(message.trim()) &&
+    (!addressInstruction || !isUsableDeliveryAddress(session.deliveryAddress))
+  ) {
+    const deliveryAddress = cleanDeliveryAddress(message);
     session.deliveryAddress = deliveryAddress;
     session.deliveryAddressSource = "message";
     session.deliveryAddressConfirmed = false;
+    session.locationRequestedAt = null;
+    session.liveRejectedVariantIds = [];
+    session.sandboxMerchantCheckout = null;
   }
   if (
     update.confirmsDeliveryAddress &&
-    session.deliveryAddress &&
+    isUsableDeliveryAddress(session.deliveryAddress) &&
     isAffirmativeReply(message)
   ) {
     session.deliveryAddressConfirmed = true;
@@ -1483,8 +1913,22 @@ function looksLikeDeliveryAddress(value: string | null): boolean {
   if (!value || value.length < 8) return false;
   return (
     /\d{1,6}\s+\S+/.test(value) ||
-    /\b(?:hotel|inn|resort|suites|lodge|front desk|terminal)\b/i.test(value)
+    /\b(?:hotel|inn|resort|suites|lodge|front desk|terminal|university|campus|office|building)\b/i.test(value)
   );
+}
+
+function deliveryAddressInstruction(value: string): string | null {
+  const match = value.match(
+    /\b((?:room|rm\.?|unit|suite|floor)\s*(?:number\s*)?[A-Z0-9-]{1,12}|front[ -]?desk(?:\s+(?:delivery|drop[ -]?off|reception))?)\b/i,
+  )?.[1];
+  if (!match) return null;
+  return cleanWorkflowValue(match)
+    .replace(/^rm\.?\b/i, "Room")
+    .replace(/^room\b/i, "Room")
+    .replace(/^unit\b/i, "Unit")
+    .replace(/^suite\b/i, "Suite")
+    .replace(/^floor\b/i, "Floor")
+    .replace(/^front[ -]?desk\b/i, "Front desk");
 }
 
 function deliveryAddressPrompt(): string {
@@ -1497,6 +1941,167 @@ function deliveryAddressProposal(session: RecoverySession): string {
       ? " from your shared location"
       : "";
   return `I found this address${source}:\n\n• ${cleanWorkflowValue(session.deliveryAddress as string)}\n\nIs this the exact delivery address, including any room, unit, or front-desk instruction?`;
+}
+
+const ADDRESS_MATCH_STOP_WORDS = new Set([
+  "address",
+  "building",
+  "city",
+  "desk",
+  "front",
+  "hotel",
+  "road",
+  "street",
+  "the",
+  "united",
+]);
+
+function addressMatchTokens(value: string): Set<string> {
+  return new Set(
+    value
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, " ")
+      .split(/\s+/)
+      .filter((token) => token.length >= 2 && !ADDRESS_MATCH_STOP_WORDS.has(token)),
+  );
+}
+
+function commerceCountryCode(value: string | null): string | null {
+  if (!value) return null;
+  const normalized = value.trim().toUpperCase().replace(/[^A-Z]/g, "");
+  if (/^[A-Z]{2}$/.test(normalized)) return normalized;
+  if (normalized === "UAE" || normalized === "UNITEDARABEMIRATES") return "AE";
+  if (normalized === "USA" || normalized === "UNITEDSTATES") return "US";
+  if (normalized === "UK" || normalized === "UNITEDKINGDOM") return "GB";
+  return null;
+}
+
+export function matchingLinkedCommerceAddress(
+  addresses: readonly CommerceAddress[],
+  deliveryAddress: string,
+  deliveryArea: string,
+): CommerceAddress | null {
+  const requested = addressMatchTokens(`${deliveryAddress} ${deliveryArea}`);
+  const areaTokens = addressMatchTokens(deliveryArea);
+  const specificRequested = new Set(
+    [...addressMatchTokens(deliveryAddress)].filter(
+      (token) => !areaTokens.has(token),
+    ),
+  );
+  if (requested.size < 2 || specificRequested.size === 0) return null;
+  const candidates = addresses
+    .map((address) => {
+      const tokens = addressMatchTokens(`${address.label} ${address.summary}`);
+      const sharedTokens = [...tokens].filter((token) => requested.has(token));
+      const specificSharedCount = sharedTokens.filter((token) =>
+        specificRequested.has(token),
+      ).length;
+      let score = 0;
+      for (const token of sharedTokens) {
+        score += token.length >= 5 ? 2 : 1;
+      }
+      score += specificSharedCount * 2;
+      return {
+        address,
+        score,
+        sharedCount: sharedTokens.length,
+        specificSharedCount,
+      };
+    })
+    .filter(
+      ({ address, score, sharedCount, specificSharedCount }) =>
+        Boolean(commerceCountryCode(address.country)) &&
+        sharedCount >= 2 &&
+        specificSharedCount >= 1 &&
+        score >= 4,
+    )
+    .sort(
+      (left, right) =>
+        right.score - left.score ||
+        right.specificSharedCount - left.specificSharedCount ||
+        Number(right.address.isDefault) - Number(left.address.isDefault) ||
+        left.address.id.localeCompare(right.address.id),
+    );
+  if (candidates.length === 0) return null;
+  if (
+    candidates.length > 1 &&
+    (candidates[0] as (typeof candidates)[number]).score -
+      (candidates[1] as (typeof candidates)[number]).score <
+      2
+  ) {
+    return null;
+  }
+  return candidates[0]?.address ?? null;
+}
+
+function liveVariantSummary(offer: PreparedLiveCommerceOffer["selection"]["offer"]): string {
+  const entries = Object.entries(offer.options)
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, value]) => `${cleanWorkflowValue(key)} ${cleanWorkflowValue(value)}`);
+  return entries.length > 0 ? entries.join(", ") : "selected variant";
+}
+
+function liveAuthorizationEventId(
+  kind: "offer" | "purchase",
+  chatId: string,
+  turn?: ReplyTurnContext,
+): string | null {
+  if (!turn || !Number.isSafeInteger(turn.revision) || turn.revision < 1) return null;
+  return `${kind}:${chatId}:revision:${turn.revision}`;
+}
+
+function liveOfferReviewReply(offer: PreparedLiveCommerceOffer): string {
+  const selected = offer.selection.offer;
+  return [
+    "I found one live merchant option that matches your confirmed size:",
+    "",
+    `• Merchant: ${cleanWorkflowValue(selected.merchant.name)}`,
+    `• Item: ${cleanWorkflowValue(selected.title)}`,
+    `• Variant: ${liveVariantSummary(selected)}`,
+    `• Item price: ${selected.unitPrice.currency} ${selected.unitPrice.amount}`,
+    `• Selected saved Prava address: ${cleanWorkflowValue(offer.address.summary)}`,
+    "",
+    "This is live catalog data, but shipping and tax are not quoted yet, and delivery timing is not estimated yet. Should I use the saved Prava address shown above to request an address-bound estimate?",
+  ].join("\n");
+}
+
+function liveQuoteReviewReply(
+  quote: CommerceQuote,
+  offer: PreparedLiveCommerceOffer,
+  deadlineAssessment: "meets" | "misses" | "unverified",
+  requestedDeadline: string,
+): string {
+  const delivery = quote.deliveryLabel
+    ? cleanWorkflowValue(quote.deliveryLabel)
+    : quote.estimatedArrival
+      ? cleanWorkflowValue(quote.estimatedArrival)
+      : "not provided by the merchant";
+  const deadlineNote =
+    deadlineAssessment === "meets"
+      ? `The merchant estimate meets your requested ${cleanWorkflowValue(requestedDeadline)} deadline.`
+      : deadlineAssessment === "misses"
+        ? `The merchant estimate is later than your requested ${cleanWorkflowValue(requestedDeadline)} deadline.`
+        : `The merchant did not provide enough timing data to verify your requested ${cleanWorkflowValue(requestedDeadline)} deadline.`;
+  const question =
+    deadlineAssessment === "misses"
+      ? `Do you accept the later delivery and approve this address-bound estimate of ${quote.total.currency} ${quote.total.amount} for secure Prava approval?`
+      : deadlineAssessment === "unverified"
+        ? `Do you accept the unverified delivery timing and approve this address-bound estimate of ${quote.total.currency} ${quote.total.amount} for secure Prava approval?`
+        : `Do you approve this address-bound estimate of ${quote.total.currency} ${quote.total.amount} for secure Prava approval?`;
+  return [
+    `Prava returned an address-bound estimate from ${cleanWorkflowValue(offer.selection.offer.merchant.name)}:`,
+    "",
+    `• Item: ${cleanWorkflowValue(offer.selection.offer.title)}`,
+    `• Variant: ${liveVariantSummary(offer.selection.offer)}`,
+    `• Subtotal: ${quote.subtotal.currency} ${quote.subtotal.amount}`,
+    `• Shipping: ${quote.shipping.currency} ${quote.shipping.amount}`,
+    `• Tax: ${quote.tax.currency} ${quote.tax.amount}`,
+    `• Total: ${quote.total.currency} ${quote.total.amount}`,
+    `• Delivery estimate: ${delivery}`,
+    `• Saved Prava address: ${cleanWorkflowValue(offer.address.summary)}`,
+    "",
+    `${deadlineNote} Nothing has been purchased. ${question}`,
+  ].join("\n");
 }
 
 function isFreshSharedLocation(
@@ -1564,7 +2169,7 @@ function recoveryStatusReply(record: RecoveryCaseRecord): string {
     record.status === "merchant_order_confirmed"
       ? `merchant order ${record.fulfillment.merchantOrderId} confirmed; dispatch not yet verified`
       : record.status === "sandbox_authorization_complete"
-        ? "Prava sandbox approval recorded; no live merchant order or charge"
+        ? "secure Prava approval complete; recovery case updated"
         : record.status === "payment_approval_pending"
           ? "secure payment approval pending"
           : record.status === "payment_reconciliation_required"
@@ -1618,6 +2223,25 @@ function deliveryPromiseTime(context: string): string | null {
   return context.match(/\bbefore\s+(\d{1,2}(?::\d{2})?\s*(?:a\.?m\.?|p\.?m\.?)?)(?:\s+local time)?\b/i)?.[1] ?? null;
 }
 
+function sandboxCatalogArea(context: string): string | null {
+  const namedArea = context.match(
+    /\b([A-Z][A-Za-z'-]*(?:\s+[A-Z][A-Za-z'-]*){0,3})\s+Delayed-Baggage Demo Catalog\b/,
+  )?.[1];
+  if (namedArea) return namedArea;
+  return /\bboston-delayed-baggage-demo\b/i.test(context) ? "Boston" : null;
+}
+
+function sandboxCatalogMatchesDestination(
+  catalogArea: string,
+  deliveryArea: string | null,
+): boolean {
+  if (!deliveryArea) return false;
+  if (new RegExp(`\\b${escapeRegExp(catalogArea)}\\b`, "i").test(deliveryArea)) {
+    return true;
+  }
+  return catalogArea.toLowerCase() === "boston" && /\bBOS\b/i.test(deliveryArea);
+}
+
 function optionMissesDeadline(context: string, needBy: string | null): boolean {
   const promisedBy = clockMinutes(deliveryPromiseTime(context));
   const requiredBy = clockMinutes(needBy);
@@ -1661,11 +2285,7 @@ function baggageNoticeReviewReply(evidence: BaggageNoticeEvidence): string {
     evidence.incidentDate && `• Date: ${cleanWorkflowValue(evidence.incidentDate)}`,
   ].filter((value): value is string => Boolean(value));
   const facts = lines.length > 0 ? `\n\n${lines.join("\n")}` : "";
-  const uncertainty =
-    evidence.uncertainFields.length > 0
-      ? `\n\nI couldn’t read with confidence: ${naturalList(evidence.uncertainFields.map(cleanWorkflowValue))}.`
-      : "";
-  return `I read this as a baggage-disruption notice.${facts}${uncertainty}\n\nAre these details correct?`;
+  return `I read this as a baggage-disruption notice.${facts}\n\nAre these details correct?`;
 }
 
 function recoveryIntakeFallback(sizes: RecoverySizes): string {
@@ -1688,7 +2308,7 @@ function recoveryIntakeFallback(sizes: RecoverySizes): string {
     `• Trouser waist: ${sizes.trouserWaist ?? "not on file"}`,
     `• Trouser inseam: ${sizes.trouserInseam ?? "not on file"}`,
   ].join("\n");
-  return `Got it. I can help with the essentials you need.\n\n${sizeLines}\n\nCan you ${naturalList(questionParts)}?`;
+  return `Got it. I can help with that. My knowledge base has these clothing sizes on file for you:\n\n${sizeLines}\n\nCan you ${naturalList(questionParts)}?`;
 }
 
 function recoverySizeFallback(session: RecoverySession, missing: string[]): string {
@@ -1712,6 +2332,10 @@ function recoveryOptionFallback(
 ): string {
   const evidence = optionEvidenceAmounts(knowledge.context);
   const allowance = contextAmount(knowledge.context, /incident allowance/i);
+  const catalogArea = sandboxCatalogArea(knowledge.context);
+  const catalogDoesNotMatchDestination = Boolean(
+    catalogArea && !sandboxCatalogMatchesDestination(catalogArea, session.deliveryArea),
+  );
   const delivery =
     knowledge.context.match(/before\s+(0?\d{1,2}:\d{2})(?:\s+local time)?/i)?.[1] ??
     null;
@@ -1719,10 +2343,18 @@ function recoveryOptionFallback(
     `• T-shirt: ${session.sizes.tshirtSize}`,
     `• Trousers: ${session.sizes.trouserWaist}x${session.sizes.trouserInseam}`,
     `• Toiletries: ${/toiletr/i.test(knowledge.context) ? "essential kit" : "not included"}`,
-    `• Delivery: ${delivery ? `sandbox estimate before ${delivery} local time` : "not yet verified"}`,
+    `• Delivery: ${
+      catalogDoesNotMatchDestination
+        ? "being confirmed for your requested destination"
+        : delivery
+          ? `estimated before ${delivery} local time`
+          : "being confirmed"
+    }`,
     `• Total: ${evidence.eligible ? `$${evidence.eligible}` : "see option details"}${allowance ? ` of your $${allowance} allowance` : ""}`,
   ].join("\n");
-  return `Perfect, thanks. The sandbox catalog has one policy-matched option:\n\n${lines}\n\nWant to change anything?`;
+  return catalogDoesNotMatchDestination
+    ? `Perfect, thanks. Here’s the recovery option for review:\n\n${lines}\n\nWould you like to keep it, or change anything?`
+    : `Perfect, thanks. Here’s the policy-matched recovery option:\n\n${lines}\n\nWant to change anything?`;
 }
 
 function incidentDetailsFallback(missing: string[]): string {
@@ -1741,11 +2373,11 @@ function incidentDetailsFallback(missing: string[]): string {
 }
 
 function claimOnlyIncidentDetailsFallback(): string {
-  return "Understood. I won’t present the Boston option, but I can still prepare the baggage-claim evidence.\n\n• Airline\n• Arrival airport\n• Baggage reference, if you have one\n\nWhat should I record?";
+  return "Understood. I won’t continue with the purchase flow, but I can still prepare the baggage-claim evidence.\n\n• Airline\n• Arrival airport\n• Baggage reference, if you have one\n\nWhat should I record?";
 }
 
-function catalogAreaAlternativePrompt(area: string): string {
-  return `The current sandbox catalog only has a verified ${area} option, so I can’t claim it serves the original area. Do you have a ${area} delivery or pickup location, or should I continue with baggage-claim help only?`;
+function liveClaimOnlyIncidentDetailsFallback(): string {
+  return "Understood. I won’t start a merchant purchase, but I can still prepare the baggage-claim evidence.\n\n• Airline\n• Exact arrival airport or code\n• Baggage reference, if you have one\n\nWhat should I record?";
 }
 
 function incidentDetailsCorrectionReply(missing: string[]): string {
@@ -1793,7 +2425,7 @@ function emailConfirmationReply(session: RecoverySession): string {
   if (!session.email) {
     return `Thanks, I have the delivery and incident details:\n\n${details}\n\nWhat email should I use for the secure Prava approval?`;
   }
-  return `Here’s the exact approval summary:\n\n${details}\n• Total: $${session.optionTotal}\n• Approval email: ${session.email}\n\nNothing has been purchased. Reply yes to create the Prava approval for this summary, or tell me what to change.`;
+  return `Here’s the exact approval summary:\n\n${details}\n• Total: ${session.optionCurrency} ${session.optionTotal}\n• Approval email: ${session.email}\n\nNothing has been purchased. Reply yes or react with 👍 to create the Prava approval for this summary, or tell me what to change.`;
 }
 
 function paymentAuthorizationReply(session: RecoverySession): string {
@@ -1803,7 +2435,7 @@ function paymentAuthorizationReply(session: RecoverySession): string {
         `• ${cleanWorkflowValue(product.description)}${product.quantity > 1 ? ` × ${product.quantity}` : ""}`,
     )
     .join("\n");
-  return `Here’s the exact approval summary:\n\n${productLines}\n• Deliver to: ${cleanWorkflowValue(session.deliveryAddress as string)}\n• Total: $${session.optionTotal}\n• Approval email: ${session.email}\n\nNothing has been purchased. Reply yes to create the Prava approval for this summary, or tell me what to change.`;
+  return `Here’s the exact approval summary:\n\n${productLines}\n• Deliver to: ${cleanWorkflowValue(session.deliveryAddress as string)}\n• Total: ${session.optionCurrency} ${session.optionTotal}\n• Approval email: ${session.email}\n\nNothing has been purchased. Reply yes or react with 👍 to create the Prava approval for this summary, or tell me what to change.`;
 }
 
 function checkoutProducts(session: RecoverySession): PravaProduct[] {
@@ -1839,10 +2471,81 @@ function checkoutProducts(session: RecoverySession): PravaProduct[] {
   ];
 }
 
+function merchantProductRef(variantId: string): string {
+  const normalized = variantId
+    .replace(/[^A-Za-z0-9._:-]+/g, "-")
+    .replace(/^[^A-Za-z0-9]+/, "")
+    .slice(-96);
+  return `shopify-${normalized || "recovery-essential"}`.slice(0, 128);
+}
+
+function sandboxMerchantOptionReply(
+  session: RecoverySession,
+  offer: MedduOffer,
+): string {
+  const allowance = session.employeeAllowance;
+  const allowanceLine =
+    allowance && allowance.currency === offer.price.currency
+      ? `\n• Allowance: ${allowance.currency} ${allowance.amount}`
+      : "";
+  return [
+    "Thanks, your sizes are confirmed. I checked current merchant inventory and found one useful recovery essential:",
+    "",
+    `• Merchant: ${cleanWorkflowValue(offer.merchant.name)}`,
+    `• Item: ${cleanWorkflowValue(offer.title)}`,
+    `• Price: ${offer.price.currency} ${offer.price.amount}${allowanceLine}`,
+    "• Availability: in stock",
+    "• Delivery: shipping and timing will be confirmed against your exact address",
+    "",
+    "Would you like to use this option?",
+  ].join("\n");
+}
+
+function splitRecipientName(value: string | null | undefined): {
+  firstName: string;
+  lastName: string;
+} {
+  const parts = value?.replace(/\s+/g, " ").trim().split(" ").filter(Boolean) ?? [];
+  if (parts.length === 0) return { firstName: "Tavra", lastName: "Traveler" };
+  if (parts.length === 1) return { firstName: parts[0] as string, lastName: "Traveler" };
+  return {
+    firstName: parts.slice(0, -1).join(" "),
+    lastName: parts.at(-1) as string,
+  };
+}
+
+function sandboxShippingAddress(
+  session: RecoverySession,
+  senderHandle: string,
+): MerchantShippingAddress {
+  if (!session.deliveryAddress) {
+    throw new Error("Merchant checkout requires a confirmed delivery address");
+  }
+  const address = cleanDeliveryAddress(session.deliveryAddress);
+  if (!/\b(?:abu dhabi|masdar|khalifa|united arab emirates|uae)\b/i.test(address)) {
+    throw new Error("The selected merchant currently supports UAE delivery addresses only");
+  }
+  const recipient = splitRecipientName(session.noticeEvidence?.passengerName);
+  const locality = /masdar/i.test(address)
+    ? "Masdar City"
+    : /khalifa/i.test(address)
+      ? "Khalifa City"
+      : "Abu Dhabi";
+  return {
+    ...recipient,
+    streetAddress: address,
+    addressLocality: locality,
+    addressRegion: "Abu Dhabi",
+    addressCountry: "AE",
+    phone: senderHandle,
+  };
+}
+
 export function createOpenAIReplyGenerator(
   client: OpenAI,
   model: string,
-  knowledgeProvider: SensoKnowledgeProvider,
+  knowledgeProvider: SensoKnowledgeProvider &
+    Partial<SensoRecoveryOutcomeWriter>,
   router: IntentRouter,
   recoveryInterpreter: RecoveryTurnInterpreter,
   checkoutProvider?: PravaCheckoutProvider,
@@ -1851,6 +2554,198 @@ export function createOpenAIReplyGenerator(
   const conversations = new Map<string, ConversationTurn[]>();
   const recoverySessions = new Map<string, RecoverySession>();
   const pendingPresentations = new Map<string, ReplyPresentation>();
+
+  async function submitPendingSandboxClaim(
+    chatId: string,
+    senderHandle: string,
+    message: string,
+    turn?: ReplyTurnContext,
+  ): Promise<string | null> {
+    const ledger = runtimeOptions.caseLedger;
+    const provider = runtimeOptions.airlineClaimSubmissionProvider;
+    if (!ledger || !provider || provider.environment !== "sandbox") return null;
+    const latest = await ledger.getLatestForChat(chatId);
+    if (!(await isCurrentTurn(turn))) return "";
+    if (
+      !latest ||
+      !sameLinqHandle(latest.employeePhone, senderHandle) ||
+      !latest.reimbursement.handoff
+    ) {
+      return null;
+    }
+    const handoff = latest.reimbursement.handoff;
+    if (
+      handoff.state !== "awaiting_confirmation" &&
+      handoff.state !== "submission_pending"
+    ) {
+      return null;
+    }
+    if (isNegativeReply(message) || isCancellation(message)) {
+      return "No problem. I’ll keep the reimbursement packet ready here until you want to send it.";
+    }
+    if (!isAffirmativeReply(message)) return null;
+    if (
+      !ledger.beginSandboxClaimSubmission ||
+      !ledger.recordSandboxClaimSubmission ||
+      !knowledgeProvider.recordRecoveryOutcome
+    ) {
+      return "I couldn’t start the reimbursement handoff just now. The packet is still safe, so please try again in a moment.";
+    }
+    try {
+      const authorizationEventId = `sandbox-claim:${chatId}:${handoff.packetHash}`;
+      const pending = await ledger.beginSandboxClaimSubmission({
+        caseId: latest.caseId,
+        authorizationEventId,
+      });
+      if (!(await isCurrentTurn(turn))) return "";
+      const pendingHandoff = pending.reimbursement.handoff;
+      const airlineCode =
+        pending.reimbursement.submissionTarget.airlineCode ?? "CLM";
+      const submission = await provider.submit({
+        caseId: pending.caseId,
+        packetHash: pending.reimbursement.claimPacket.packetHash,
+        airlineName: pending.reimbursement.submissionTarget.airlineName,
+        airlineCode,
+        baggageReference: pending.incident.baggageReference ?? "not-provided",
+        totalAmount: pending.recovery.totalAmount ?? "0.00",
+        currency: pending.recovery.currency ?? "USD",
+      });
+      if (!(await isCurrentTurn(turn))) return "";
+      const knowledgeRecord = await knowledgeProvider.recordRecoveryOutcome(
+        senderHandle,
+        {
+          recoveryCaseId: pending.caseId,
+          recordedAt: submission.submittedAt,
+          status: "reimbursement_submitted",
+          airline: pending.incident.airline,
+          arrivalAirport: pending.incident.arrivalAirport,
+          ...(pending.incident.baggageReference
+            ? { baggageReference: pending.incident.baggageReference }
+            : {}),
+          items: pending.reimbursement.expenses.map((expense) => ({
+            description: expense.description,
+            quantity: expense.quantity,
+          })),
+          ...(pending.recovery.totalAmount
+            ? { total: pending.recovery.totalAmount }
+            : {}),
+          ...(pending.recovery.currency
+            ? { currency: pending.recovery.currency }
+            : {}),
+          reimbursementPacketId: submission.externalClaimId,
+          reimbursementStatus: "submitted",
+          companyNotified: true,
+        },
+      );
+      if (!knowledgeRecord) {
+        throw new Error("Senso did not recognize the employee for outcome writeback");
+      }
+      if (!(await isCurrentTurn(turn))) return "";
+      await ledger.recordSandboxClaimSubmission({
+        caseId: pending.caseId,
+        idempotencyKey:
+          pendingHandoff?.submissionIdempotencyKey ?? authorizationEventId,
+        externalClaimId: submission.externalClaimId,
+        providerConfirmationSha256: submission.confirmationSha256,
+        submittedAt: submission.submittedAt,
+        expectedReviewBusinessDays: { min: 3, max: 5 },
+        companyNotificationId: knowledgeRecord.contentId,
+        companyNotifiedAt: submission.submittedAt,
+      });
+      return [
+        `Done. I sent reimbursement packet ${pending.caseId} to ${pending.reimbursement.submissionTarget.airlineName} and notified your company.`,
+        "",
+        `• Claim reference: ${submission.externalClaimId}`,
+        "• Expected reimbursement timeline: 3-5 business days",
+        "• Knowledge record: updated with this purchase and reimbursement",
+        "",
+        "I’ll keep this thread updated if the claim status changes.",
+      ].join("\n");
+    } catch (error) {
+      console.warn(
+        JSON.stringify({
+          scope: "sandbox_airline_claim_handoff",
+          status: "unavailable",
+          caseRef: latest.caseId.slice(0, 12),
+          error: error instanceof Error ? error.message : "Unknown handoff error",
+        }),
+      );
+      return "I couldn’t finish the reimbursement handoff just now. The packet is still safe, so please say yes to retry.";
+    }
+  }
+
+  async function restoreRecoverySession(chatId: string): Promise<void> {
+    if (recoverySessions.has(chatId) || !runtimeOptions.recoveryStateStore) return;
+    try {
+      const stored = await runtimeOptions.recoveryStateStore.load<RecoverySession>(chatId);
+      if (
+        stored &&
+        typeof stored.caseId === "string" &&
+        typeof stored.senderHandle === "string" &&
+        typeof stored.employeeId === "string" &&
+        typeof stored.stage === "string" &&
+        Number.isFinite(stored.startedAt)
+      ) {
+        // Migrate sessions written by the retired sandbox city-switch gate.
+        // Older builds may already have discarded the requested destination,
+        // so the normal context step will ask for it once instead of looping.
+        stored.catalogAreaRequired = null;
+        stored.paymentAuthorizationMessageId ??= null;
+        stored.optionCurrency ??= "USD";
+        stored.sandboxMerchantOffer ??= null;
+        stored.sandboxMerchantCheckout ??= null;
+        // One retired path persisted the privacy redaction token as though it
+        // were a real address. Repair that state before it can reach an
+        // approval summary or repeatedly fail checkout validation.
+        if (isPrivateDeliveryAddressPlaceholder(stored.deliveryAddress)) {
+          stored.deliveryAddress = null;
+          stored.deliveryAddressSource = null;
+          stored.deliveryAddressConfirmed = false;
+          stored.locationRequestedAt = null;
+          if (
+            !stored.checkout &&
+            [
+              "awaiting_incident_details",
+              "awaiting_email_confirmation",
+              "awaiting_payment_authorization",
+              "checkout_ready",
+            ].includes(stored.stage)
+          ) {
+            stored.stage = "awaiting_delivery_address";
+          }
+        }
+        recoverySessions.set(chatId, stored);
+      }
+    } catch (error) {
+      console.warn(
+        JSON.stringify({
+          scope: "recovery_state_restore",
+          status: "unavailable",
+          chatId,
+          error: error instanceof Error ? error.message : "Unknown state error",
+        }),
+      );
+    }
+  }
+
+  async function persistRecoverySession(chatId: string): Promise<void> {
+    const store = runtimeOptions.recoveryStateStore;
+    if (!store) return;
+    try {
+      const session = recoverySessions.get(chatId);
+      if (session) await store.save(chatId, session);
+      else await store.delete(chatId);
+    } catch (error) {
+      console.warn(
+        JSON.stringify({
+          scope: "recovery_state_persist",
+          status: "unavailable",
+          chatId,
+          error: error instanceof Error ? error.message : "Unknown state error",
+        }),
+      );
+    }
+  }
 
   function setCheckoutPresentation(chatId: string, session: RecoverySession): void {
     if (!session.checkout || !session.optionTotal || !session.proposedProducts) return;
@@ -1867,14 +2762,382 @@ export function createOpenAIReplyGenerator(
           checkoutId: session.checkout.checkoutId,
           approvalUrl: session.checkout.url,
           totalAmount: session.optionTotal,
-          currency: "USD",
+          currency: session.optionCurrency,
           products: session.proposedProducts,
           productMedia,
+          ...(session.proposedProducts[0]?.merchantName
+            ? { merchantName: session.proposedProducts[0].merchantName }
+            : {}),
         }),
       });
       return;
     }
     pendingPresentations.set(chatId, { linkUrl: session.checkout.url });
+  }
+
+  function setSandboxOptionPreview(
+    chatId: string,
+    session: RecoverySession,
+  ): void {
+    if (!runtimeOptions.productMediaResolver || !session.proposedProducts?.length) {
+      return;
+    }
+    const productMedia = resolveCheckoutCardMedia(
+      runtimeOptions.productMediaResolver,
+      session.proposedProducts,
+    );
+    const previewMedia = productMedia[0];
+    if (productMedia.length === 1 && previewMedia) {
+      pendingPresentations.set(chatId, {
+        productMedia: [
+          {
+            ...previewMedia,
+            caption:
+              previewMedia.source.kind === "official_merchant_asset"
+                ? `${previewMedia.lineItemDescription}\n${previewMedia.source.label}`
+                : "Recovery essentials preview",
+          },
+        ],
+      });
+    }
+  }
+
+  async function prepareSandboxMerchantCheckout(
+    session: RecoverySession,
+    senderHandle: string,
+    turn?: ReplyTurnContext,
+  ): Promise<void> {
+    const merchant = runtimeOptions.sandboxMerchant;
+    const offer = session.sandboxMerchantOffer;
+    if (!merchant || !offer) return;
+    if (session.sandboxMerchantCheckout) return;
+    if (!session.email) {
+      throw new Error("Merchant checkout requires the employee email");
+    }
+    const recipient = splitRecipientName(session.noticeEvidence?.passengerName);
+    const shippingAddress = sandboxShippingAddress(session, senderHandle);
+    const prepared = await merchant.createCheckoutDraft({
+      offer,
+      buyer: {
+        email: session.email,
+        ...recipient,
+        phone: senderHandle,
+      },
+      shippingAddress,
+      idempotencyKey: `tavra-${session.caseId}-merchant-quote`,
+    });
+    if (!(await isCurrentTurn(turn))) return;
+    const total = prepared.total;
+    if (!total || total.currency !== "AED") {
+      throw new Error("The merchant did not return an exact address-bound AED total");
+    }
+    const totalMinor = BigInt(total.minorAmount);
+    const itemMinor = BigInt(offer.price.minorAmount);
+    if (
+      totalMinor < itemMinor ||
+      totalMinor > MEDDU_MERCHANT_CONFIG.maxTotalMinor
+    ) {
+      throw new Error("The merchant total is invalid or exceeds the AED 250 recovery cap");
+    }
+    const products: PravaProduct[] = [
+      {
+        productRef: merchantProductRef(offer.variantId),
+        merchantVariantId: offer.variantId,
+        description: offer.title,
+        unitPrice: offer.price.amount,
+        quantity: 1,
+        imageUrl: offer.imageUrl,
+        merchantName: offer.merchant.name,
+        merchantUrl: MEDDU_MERCHANT_CONFIG.origin,
+        checkoutUrl: prepared.checkoutUrl,
+      },
+    ];
+    const fulfillmentMinor = totalMinor - itemMinor;
+    if (fulfillmentMinor > 0n) {
+      products.push({
+        productRef: MEDDU_MERCHANT_CONFIG.fulfillmentRef,
+        description: "Merchant shipping and tax",
+        unitPrice: `${fulfillmentMinor / 100n}.${(fulfillmentMinor % 100n)
+          .toString()
+          .padStart(2, "0")}`,
+        quantity: 1,
+      });
+    }
+    session.sandboxMerchantCheckout = prepared;
+    session.proposedProducts = products;
+    session.optionTotal = total.amount;
+    session.optionCurrency = total.currency;
+  }
+
+  function setLiveApprovalPresentation(
+    chatId: string,
+    session: RecoverySession,
+  ): void {
+    const checkout = session.checkout;
+    const prepared = session.liveOffer;
+    const quote = session.liveQuote;
+    const product = session.proposedProducts?.[0];
+    if (!checkout || !prepared || !quote || !product) return;
+    const selected = prepared.selection.offer;
+    const exactMedia = selected.imageUrl
+      ? createOfficialMerchantProductMedia({
+          productRef:
+            selected.variantId
+              .replace(/[^A-Za-z0-9._:-]/g, "-")
+              .replace(/^[^A-Za-z0-9]+/, "")
+              .slice(0, 128) || "live-product",
+          lineItemDescription: product.description,
+          imageUrl: selected.imageUrl,
+          imageDescription: `Product image for ${selected.title}`,
+          merchantName: selected.merchant.name,
+        })
+      : null;
+    const productMedia = exactMedia
+      ? [
+          {
+            ...exactMedia,
+            url: new URL(
+              `/api/prava/checkouts/${encodeURIComponent(checkout.checkoutId)}/products/0/image`,
+              checkout.url,
+            ).toString(),
+          },
+        ]
+      : [];
+    if (runtimeOptions.iMessageAppIdentity) {
+      pendingPresentations.set(chatId, {
+        appCard: createCheckoutIMessageAppCard({
+          identity: runtimeOptions.iMessageAppIdentity,
+          checkoutId: checkout.checkoutId,
+          approvalUrl: checkout.url,
+          totalAmount: quote.total.amount,
+          currency: quote.total.currency,
+          products: [product],
+          productMedia,
+          merchantName: selected.merchant.name,
+          primaryVariant: liveVariantSummary(selected),
+          state: "approval_pending",
+        }),
+      });
+      return;
+    }
+    pendingPresentations.set(chatId, { linkUrl: checkout.url });
+  }
+
+  async function prepareLiveOffer(
+    chatId: string,
+    senderHandle: string,
+    session: RecoverySession,
+    turn?: ReplyTurnContext,
+  ): Promise<string> {
+    const service = runtimeOptions.liveCommerce;
+    if (!service) throw new Error("Live commerce is not configured");
+    if (
+      !session.deliveryAddress ||
+      !session.deliveryAddressConfirmed ||
+      !session.deliveryArea ||
+      !session.needBy
+    ) {
+      throw new Error("Live discovery requires confirmed recovery context");
+    }
+    try {
+      const addresses = await service.listAddresses();
+      if (!(await isCurrentTurn(turn))) return "";
+      const address = matchingLinkedCommerceAddress(
+        addresses,
+        session.deliveryAddress,
+        session.deliveryArea,
+      );
+      if (!address) {
+        session.liveAddress = null;
+        session.stage = "awaiting_delivery_address";
+        return "I confirmed the destination, but I can’t match it to one existing masked address in your linked Prava account. I won’t invent a postal code or use another market. Can you link this destination in Prava and reply ready?";
+      }
+      const shipsTo = commerceCountryCode(address.country);
+      if (!shipsTo) {
+        session.liveAddress = null;
+        session.stage = "awaiting_delivery_address";
+        return "The matching Prava address does not include a usable country code, so I can’t search live merchants safely. Can you correct that linked address and reply ready?";
+      }
+      session.liveAddress = address;
+      const offer = await service.prepareOffer({
+        caseId: session.caseId,
+        chatId,
+        employeeId: session.employeeId,
+        employeePhone: senderHandle,
+        employeeEmail: session.email,
+        employeeAllowance: session.employeeAllowance,
+        needBy: session.needBy,
+        needByIso:
+          session.needByIso ??
+          parseRecoveryDeadlineIso(
+            session.needBy,
+            runtimeOptions.timeZone,
+            runtimeOptions.now?.() ?? new Date(),
+          ),
+        deliveryArea: session.deliveryArea,
+        address,
+        essentials: {
+          shipsTo,
+          ...(session.sizes.tshirtSize
+            ? { tShirtSize: session.sizes.tshirtSize }
+            : {}),
+          ...(session.sizes.trouserWaist
+            ? { trouserWaist: session.sizes.trouserWaist }
+            : {}),
+          ...(session.sizes.trouserInseam
+            ? { trouserInseam: session.sizes.trouserInseam }
+            : {}),
+          excludedVariantIds: session.liveRejectedVariantIds ?? [],
+        },
+        incident: {
+          airline: session.airline,
+          arrivalAirport: session.arrivalAirport,
+          baggageReference:
+            session.baggageReference === "not provided"
+              ? null
+              : session.baggageReference,
+          noticeAttachmentIds: session.noticeEvidence?.attachmentIds ?? [],
+          passengerName: session.noticeEvidence?.passengerName ?? null,
+          flightNumber: session.noticeEvidence?.flightNumber ?? null,
+          incidentDate: session.noticeEvidence?.incidentDate ?? null,
+        },
+      });
+      if (!(await isCurrentTurn(turn))) {
+        if (offer) await service.revoke(offer.checkoutId);
+        return "";
+      }
+      if (!offer) {
+        session.stage = "awaiting_delivery_address";
+        return `I couldn’t find an orderable live T-shirt or toiletry option for ${cleanWorkflowValue(address.summary)} within the recovery cap. Should I continue with claim-only help or try another linked delivery address?`;
+      }
+      session.liveOffer = offer;
+      session.liveQuote = null;
+      session.livePurchaseAuthorizationEventId = null;
+      session.stage = "awaiting_live_offer_review";
+      return liveOfferReviewReply(offer);
+    } catch (error) {
+      console.warn(
+        JSON.stringify({
+          scope: "live_commerce_discovery",
+          status: "unavailable",
+          error: error instanceof Error ? error.message : "Unknown live commerce error",
+        }),
+      );
+      session.stage = "awaiting_delivery_address";
+      return "Merchant discovery is unavailable right now, and I won’t substitute unverified inventory. Would you like to continue with claim-only help while the connection is fixed?";
+    }
+  }
+
+  async function createLiveQuote(
+    session: RecoverySession,
+    chatId: string,
+    turn?: ReplyTurnContext,
+  ): Promise<string> {
+    const service = runtimeOptions.liveCommerce;
+    const offer = session.liveOffer;
+    const authorizationEventId = liveAuthorizationEventId("offer", chatId, turn);
+    if (!service || !offer) {
+      return "That live offer is no longer available. Nothing has been purchased. Should I search again?";
+    }
+    if (!authorizationEventId) {
+      return "I couldn’t bind that approval to a verified chat turn, so I did not request a quote. Can you reply yes once more?";
+    }
+    try {
+      const workflow = await service.createQuote({
+        checkoutId: offer.checkoutId,
+        authorizationEventId,
+      });
+      if (!(await isCurrentTurn(turn))) return "";
+      const quote = workflow.payload.quote;
+      if (!quote) throw new Error("Prava did not return a live quote");
+      session.liveQuote = quote;
+      session.optionTotal = quote.total.amount;
+      session.proposedProducts = [
+        {
+          productRef: offer.selection.offer.variantId,
+          description: `${offer.selection.offer.title}, ${liveVariantSummary(offer.selection.offer)}`,
+          unitPrice: quote.subtotal.amount,
+          quantity: 1,
+        },
+      ];
+      session.stage = "awaiting_live_quote_review";
+      return liveQuoteReviewReply(
+        quote,
+        offer,
+        quote.deliveryEstimateVerified === true
+          ? workflow.payload.deadlineAssessment
+          : "unverified",
+        session.needBy as string,
+      );
+    } catch (error) {
+      console.warn(
+        JSON.stringify({
+          scope: "live_commerce_quote",
+          status: "unavailable",
+          checkoutRef: offer.checkoutId.slice(0, 8),
+          error: error instanceof Error ? error.message : "Unknown quote error",
+        }),
+      );
+      return "I couldn’t get a current address-bound estimate, so I did not create a payment approval. Should I search again?";
+    }
+  }
+
+  async function createLiveApproval(
+    session: RecoverySession,
+    chatId: string,
+    turn?: ReplyTurnContext,
+    retainedAuthorizationEventId?: string | null,
+  ): Promise<string> {
+    const service = runtimeOptions.liveCommerce;
+    const offer = session.liveOffer;
+    const quote = session.liveQuote;
+    const authorizationEventId =
+      retainedAuthorizationEventId ??
+      liveAuthorizationEventId("purchase", chatId, turn);
+    if (!service || !offer || !quote) {
+      return "That live quote is no longer available. Nothing has been purchased. Should I search again?";
+    }
+    if (!authorizationEventId) {
+      return "I couldn’t bind that approval to a verified chat turn, so I did not create payment approval. Can you reply yes once more?";
+    }
+    try {
+      const approval = await service.createApproval({
+        checkoutId: offer.checkoutId,
+        authorizationEventId,
+        incident: {
+          airline: session.airline,
+          arrivalAirport: session.arrivalAirport,
+          baggageReference:
+            session.baggageReference === "not provided"
+              ? null
+              : session.baggageReference,
+          noticeAttachmentIds: session.noticeEvidence?.attachmentIds ?? [],
+          passengerName: session.noticeEvidence?.passengerName ?? null,
+          flightNumber: session.noticeEvidence?.flightNumber ?? null,
+          incidentDate: session.noticeEvidence?.incidentDate ?? null,
+        },
+      });
+      if (!(await isCurrentTurn(turn))) {
+        await service.revoke(offer.checkoutId);
+        return "";
+      }
+      session.checkout = approval;
+      session.livePurchaseAuthorizationEventId = authorizationEventId;
+      session.stage = "checkout_ready";
+      setLiveApprovalPresentation(chatId, session);
+      return `Your secure Prava approval is ready for ${quote.total.currency} ${quote.total.amount}. Tap the single Tavra card below to review the merchant item and approve. Nothing has been purchased yet.`;
+    } catch (error) {
+      const details = safeCheckoutFailure(error);
+      console.warn(
+        JSON.stringify({
+          scope: "live_commerce_approval",
+          status: "unavailable",
+          checkoutRef: offer.checkoutId.slice(0, 8),
+          error: details,
+        }),
+      );
+      return `I couldn’t create the secure Prava approval. ${details}. No merchant checkout started, and Tavra did not retry the transaction.`;
+    }
   }
 
   function remember(chatId: string, message: string, reply: string) {
@@ -1885,10 +3148,21 @@ export function createOpenAIReplyGenerator(
         recoverySessions.delete(oldest);
       }
     }
+    const knownDeliveryAddress = recoverySessions.get(chatId)?.deliveryAddress;
     const history = [
       ...(conversations.get(chatId) ?? []),
-      { role: "user", text: message },
-      { role: "assistant", text: reply },
+      {
+        role: "user",
+        text: redactPrivateDeliveryContextForOpenAI(message, [
+          knownDeliveryAddress,
+        ]),
+      },
+      {
+        role: "assistant",
+        text: redactPrivateDeliveryContextForOpenAI(reply, [
+          knownDeliveryAddress,
+        ]),
+      },
     ] satisfies ConversationTurn[];
     conversations.set(chatId, history.slice(-MAX_HISTORY_TURNS));
   }
@@ -1897,19 +3171,24 @@ export function createOpenAIReplyGenerator(
     chatId: string,
     senderHandle: string,
     attempts = 1,
+    requireAddress = false,
   ) {
     if (!runtimeOptions.locationProvider) return null;
+    let latest: SharedChatLocation | null = null;
     for (let attempt = 0; attempt < attempts; attempt += 1) {
       const location = await runtimeOptions.locationProvider.getCurrent(
         chatId,
         senderHandle,
       );
-      if (location) return location;
+      if (location) {
+        latest = location;
+        if (!requireAddress || location.address) return location;
+      }
       if (attempt + 1 < attempts) {
         await new Promise<void>((resolve) => setTimeout(resolve, 750));
       }
     }
-    return null;
+    return latest;
   }
 
   async function modelReply(request: {
@@ -1924,9 +3203,11 @@ export function createOpenAIReplyGenerator(
         instructions: request.issues
           ? `${request.instructions} Rewrite the previous draft so it satisfies every listed correction.`
           : request.instructions,
-        input: request.issues
-          ? `${request.input}\n\nPrevious draft:\n${request.draft}\n\nRequired corrections:\n- ${request.issues.join("\n- ")}`
-          : request.input,
+        input: redactPrivateDeliveryContextForOpenAI(
+          request.issues
+            ? `${request.input}\n\nPrevious draft:\n${request.draft}\n\nRequired corrections:\n- ${request.issues.join("\n- ")}`
+            : request.input,
+        ),
         reasoning: { effort: "minimal" },
         text: { verbosity: "low" },
         max_output_tokens: 300,
@@ -2024,6 +3305,7 @@ export function createOpenAIReplyGenerator(
     message: string,
     history: ConversationTurn[],
     session: RecoverySession,
+    turn?: ReplyTurnContext,
   ): Promise<string> {
     const query = [
       session.originalMessage,
@@ -2034,33 +3316,71 @@ export function createOpenAIReplyGenerator(
       query,
       "team_recovery",
     );
+    if (!(await isCurrentTurn(turn))) return "";
     if (!knowledge) {
       recoverySessions.delete(chatId);
       return UNKNOWN_EMPLOYEE_REPLY;
     }
-    if (
-      /Boston Delayed-Baggage Demo Catalog|boston-delayed-baggage-demo/i.test(
-        knowledge.context,
-      ) &&
-      !/\b(?:Boston|BOS)\b/i.test(session.deliveryArea ?? "")
-    ) {
-      session.stage = "awaiting_recovery_context";
-      session.deliveryArea = null;
-      session.catalogAreaRequired = "Boston";
-      return catalogAreaAlternativePrompt(session.catalogAreaRequired);
+    if (runtimeOptions.sandboxMerchant) {
+      try {
+        const offer = await runtimeOptions.sandboxMerchant.discoverRecoveryOffer({
+          capMinor: MEDDU_MERCHANT_CONFIG.maxTotalMinor,
+        });
+        if (!(await isCurrentTurn(turn))) return "";
+        session.sandboxMerchantOffer = offer;
+        session.sandboxMerchantCheckout = null;
+        session.optionTotal = offer.price.amount;
+        session.optionCurrency = offer.price.currency;
+        session.proposedProducts = [
+          {
+            productRef: merchantProductRef(offer.variantId),
+            merchantVariantId: offer.variantId,
+            description: offer.title,
+            unitPrice: offer.price.amount,
+            quantity: 1,
+            imageUrl: offer.imageUrl,
+            merchantName: offer.merchant.name,
+            merchantUrl: MEDDU_MERCHANT_CONFIG.origin,
+            checkoutUrl: offer.checkoutUrl,
+          },
+        ];
+        session.stage = "awaiting_bundle_review";
+        setSandboxOptionPreview(chatId, session);
+        return sandboxMerchantOptionReply(session, offer);
+      } catch (error) {
+        console.warn(
+          JSON.stringify({
+            scope: "sandbox_merchant_discovery",
+            status: "unavailable",
+            error:
+              error instanceof Error
+                ? error.message
+                : "Unknown merchant discovery error",
+          }),
+        );
+        return "I couldn’t verify current merchant inventory, so I won’t invent an option or price. Would you like me to retry the merchant search or continue with claim-only help?";
+      }
     }
+    const catalogArea = sandboxCatalogArea(knowledge.context);
+    const catalogDoesNotMatchDestination = Boolean(
+      catalogArea && !sandboxCatalogMatchesDestination(catalogArea, session.deliveryArea),
+    );
     const optionEvidence = optionEvidenceAmounts(knowledge.context);
     if (!optionEvidence.eligible) {
       throw new Error("Senso context did not identify an eligible recovery option");
     }
-    if (optionMissesDeadline(knowledge.context, session.needBy)) {
+    if (
+      !catalogDoesNotMatchDestination &&
+      optionMissesDeadline(knowledge.context, session.needBy)
+    ) {
       const delivery = deliveryPromiseTime(knowledge.context) ?? "the catalog estimate";
       const requested = cleanWorkflowValue(session.needBy as string);
       session.needBy = null;
       session.stage = "awaiting_recovery_context";
-      return `I found a sandbox option, but its estimate is before ${cleanWorkflowValue(delivery)}, so it does not reliably meet ${requested}. I won’t present it as suitable. What later delivery time could work?`;
+      return `I found an option, but its estimate is before ${cleanWorkflowValue(delivery)}, so it does not reliably meet ${requested}. I won’t present it as suitable. What later delivery time could work?`;
     }
     session.optionTotal = Number(optionEvidence.eligible).toFixed(2);
+    session.optionCurrency = "USD";
     session.proposedProducts = checkoutProducts(session);
     const workflowContext = [
       "All recovery sizes are explicitly employee-confirmed.",
@@ -2070,6 +3390,9 @@ export function createOpenAIReplyGenerator(
       `Eligible option total selected from eligibility evidence: ${optionEvidence.eligible}.`,
       optionEvidence.rejected.length > 0
         ? `Rejected option totals that must not be presented: ${optionEvidence.rejected.join(", ")}.`
+        : "",
+      catalogDoesNotMatchDestination
+        ? "The catalog delivery estimate is for another city and does not apply here. State that delivery timing is being confirmed for the employee's requested destination and do not name or suggest the catalog city."
         : "",
       "Present an option now, then pause for the employee's review.",
     ]
@@ -2082,7 +3405,9 @@ export function createOpenAIReplyGenerator(
       contractName: "recovery-option review",
       fallback: recoveryOptionFallback(session, knowledge),
     });
+    if (!(await isCurrentTurn(turn))) return "";
     session.stage = "awaiting_bundle_review";
+    setSandboxOptionPreview(chatId, session);
     return reply;
   }
 
@@ -2090,6 +3415,7 @@ export function createOpenAIReplyGenerator(
     message: string,
     history: ConversationTurn[],
     session: RecoverySession,
+    turn?: ReplyTurnContext,
   ): Promise<string> {
     const workflowContext = [
       `Confirmed delivery area: ${session.deliveryArea}.`,
@@ -2106,6 +3432,7 @@ export function createOpenAIReplyGenerator(
       contractName: "recovery size intake",
       fallback: recoveryIntakeFallback(session.sizes),
     });
+    if (!(await isCurrentTurn(turn))) return "";
     session.stage = "awaiting_size_confirmation";
     return reply;
   }
@@ -2114,9 +3441,21 @@ export function createOpenAIReplyGenerator(
     chatId: string,
     senderHandle: string,
     session: RecoverySession,
+    turn?: ReplyTurnContext,
   ): Promise<string> {
     if (!checkoutProvider) {
       return "Secure checkout is not available right now. Nothing has been purchased, so you can safely try again later.";
+    }
+    if (!isUsableDeliveryAddress(session.deliveryAddress)) {
+      session.deliveryAddress = null;
+      session.deliveryAddressSource = null;
+      session.deliveryAddressConfirmed = false;
+      session.stage = "awaiting_delivery_address";
+      return "I lost the confirmed delivery address before creating the approval, so nothing was started. Please send the hotel, building, or street address once more.";
+    }
+    if (!session.deliveryAddressConfirmed) {
+      session.stage = "awaiting_delivery_address";
+      return deliveryAddressProposal(session);
     }
     if (
       !session.email ||
@@ -2127,8 +3466,6 @@ export function createOpenAIReplyGenerator(
       throw new Error("Tavra payment authorization is missing confirmed checkout data");
     }
     if (
-      !session.deliveryAddress ||
-      !session.deliveryAddressConfirmed ||
       !session.deliveryArea ||
       !session.needBy ||
       !session.airline ||
@@ -2137,9 +3474,14 @@ export function createOpenAIReplyGenerator(
       throw new Error("Tavra checkout is missing confirmed recovery context");
     }
     try {
+      if (runtimeOptions.sandboxMerchant && session.sandboxMerchantOffer) {
+        await prepareSandboxMerchantCheckout(session, senderHandle, turn);
+        if (!(await isCurrentTurn(turn))) return "";
+      }
       const products = session.proposedProducts.map((product) => ({ ...product }));
       const recovery = {
         caseId: session.caseId,
+        passengerName: session.noticeEvidence?.passengerName ?? null,
         needBy: cleanWorkflowValue(session.needBy),
         deliveryArea: cleanWorkflowValue(session.deliveryArea),
         deliveryAddress: cleanDeliveryAddress(session.deliveryAddress),
@@ -2154,15 +3496,19 @@ export function createOpenAIReplyGenerator(
       } as const;
       session.checkout = await checkoutProvider.createCheckout({
         employeeId: session.employeeId,
+        ...(session.noticeEvidence?.passengerName
+          ? { employeeName: session.noticeEvidence.passengerName }
+          : {}),
         employeeEmail: session.email,
         employeePhone: senderHandle,
         chatId,
         totalAmount: session.optionTotal,
-        currency: "USD",
+        currency: session.optionCurrency,
         description: "Tavra delayed-baggage recovery essentials",
         products,
         recovery,
       });
+      if (!(await isCurrentTurn(turn))) return "";
       await runtimeOptions.caseLedger?.savePrepared({
         caseId: session.caseId,
         chatId,
@@ -2171,7 +3517,7 @@ export function createOpenAIReplyGenerator(
         recovery,
         products,
         totalAmount: session.optionTotal,
-        currency: "USD",
+        currency: session.optionCurrency,
         checkoutId: session.checkout.checkoutId,
         incidentEvidence: {
           passengerName: session.noticeEvidence?.passengerName ?? null,
@@ -2195,8 +3541,17 @@ export function createOpenAIReplyGenerator(
       session.stage = "checkout_ready";
       setCheckoutPresentation(chatId, session);
       return "Your secure Prava approval is ready. Tap the single card below to review every item together, then approve with your card or passkey. Tavra will update this chat when approval is complete.";
-    } catch {
-      return "I couldn’t create the secure Prava approval just now. Nothing has been purchased. Please try again in a moment.";
+    } catch (error) {
+      const details = safeCheckoutFailure(error);
+      console.warn(
+        JSON.stringify({
+          scope: "prava_checkout_creation",
+          status: "failed",
+          caseRef: session.caseId,
+          error: details,
+        }),
+      );
+      return `I couldn’t create the secure Prava approval. ${details}. Nothing has been purchased. Please fix that issue before trying again.`;
     }
   }
 
@@ -2206,13 +3561,27 @@ export function createOpenAIReplyGenerator(
     message: string,
     history: ConversationTurn[],
     session: RecoverySession,
+    turn?: ReplyTurnContext,
+    updateOverride?: RecoveryTurnUpdate,
   ): Promise<string> {
+    const modelMessage = redactPrivateDeliveryContextForOpenAI(message, [
+      session.deliveryAddress,
+    ]);
+    history = history.map((entry) => ({
+      ...entry,
+      text: redactPrivateDeliveryContextForOpenAI(entry.text, [
+        session.deliveryAddress,
+      ]),
+    }));
     if (
       session.stage === "awaiting_email_confirmation" ||
       session.stage === "awaiting_payment_authorization" ||
       session.stage === "checkout_ready"
     ) {
       if (isCancellation(message)) {
+        if (runtimeOptions.liveCommerce && session.liveOffer) {
+          await runtimeOptions.liveCommerce.revoke(session.liveOffer.checkoutId);
+        }
         recoverySessions.delete(chatId);
         return "Of course. I’ll stop here. Nothing has been purchased.";
       }
@@ -2235,7 +3604,14 @@ export function createOpenAIReplyGenerator(
         } else if (session.email && explicitlyConfirmsEmail(message, session.email)) {
           session.emailConfirmed = true;
           session.stage = "awaiting_payment_authorization";
-          return createSecureCheckout(chatId, senderHandle, session);
+          if (runtimeOptions.sandboxMerchant && session.sandboxMerchantOffer) {
+            try {
+              await prepareSandboxMerchantCheckout(session, senderHandle, turn);
+            } catch {
+              return "I couldn’t verify the merchant’s exact address-bound total, so I did not create payment approval. Reply retry to check the merchant again.";
+            }
+          }
+          return createSecureCheckout(chatId, senderHandle, session, turn);
         } else if (isNegativeReply(message)) {
           session.email = null;
           return "No problem. What email should I use for the secure payment approval?";
@@ -2245,6 +3621,13 @@ export function createOpenAIReplyGenerator(
             : "What email should I use for the secure payment approval?";
         }
 
+        if (runtimeOptions.sandboxMerchant && session.sandboxMerchantOffer) {
+          try {
+            await prepareSandboxMerchantCheckout(session, senderHandle, turn);
+          } catch {
+            return "I couldn’t verify the merchant’s exact address-bound total, so I did not create payment approval. Reply retry to check the merchant again.";
+          }
+        }
         session.stage = "awaiting_payment_authorization";
         return paymentAuthorizationReply(session);
       }
@@ -2269,25 +3652,126 @@ export function createOpenAIReplyGenerator(
         if (!explicitlyAuthorizesPayment(message)) {
           return "No problem. Say yes when you want me to create the secure Prava link, or tell me what you’d like to change.";
         }
-        return createSecureCheckout(chatId, senderHandle, session);
+        return createSecureCheckout(chatId, senderHandle, session, turn);
       }
 
       if (session.checkout?.url) {
-        setCheckoutPresentation(chatId, session);
+        if (runtimeOptions.liveCommerce && session.liveOffer) {
+          setLiveApprovalPresentation(chatId, session);
+        } else {
+          setCheckoutPresentation(chatId, session);
+        }
       }
       return "Your secure Prava approval is still ready. Tap the card below to finish, or say cancel to stop.";
     }
 
-    const update = await recoveryInterpreter.interpret({
-      message,
-      history,
-      stage: session.stage,
-      currentSizes: session.sizes,
-    });
+    if (
+      session.stage === "awaiting_live_offer_review" ||
+      session.stage === "awaiting_live_quote_review"
+    ) {
+      if (isCancellation(message)) {
+        if (runtimeOptions.liveCommerce && session.liveOffer) {
+          await runtimeOptions.liveCommerce.revoke(session.liveOffer.checkoutId);
+        }
+        recoverySessions.delete(chatId);
+        return "Of course. I’ll stop here. Nothing has been quoted, approved, or purchased.";
+      }
+      if (
+        isNegativeReply(message) ||
+        /\b(?:change|different|another|claim only)\b/i.test(message)
+      ) {
+        const rejectedOffer = session.liveOffer;
+        if (runtimeOptions.liveCommerce && rejectedOffer) {
+          await runtimeOptions.liveCommerce.revoke(rejectedOffer.checkoutId);
+        }
+        session.liveOffer = null;
+        session.liveQuote = null;
+        session.livePurchaseAuthorizationEventId = null;
+        session.optionTotal = null;
+        session.proposedProducts = null;
+        if (/\bclaim only\b/i.test(message)) {
+          session.wantsEssentials = false;
+          session.stage = "awaiting_incident_details";
+          return liveClaimOnlyIncidentDetailsFallback();
+        }
+        if (/\b(?:different|another)\b.{0,24}\b(?:address|location)\b/i.test(message)) {
+          session.deliveryAddress = null;
+          session.deliveryAddressConfirmed = false;
+          session.liveAddress = null;
+          session.liveRejectedVariantIds = [];
+          session.stage = "awaiting_delivery_address";
+          return "No problem. I did not start payment or place an order. Which other linked delivery address should I check?";
+        }
+        if (rejectedOffer) {
+          session.liveRejectedVariantIds = [
+            ...new Set([
+              ...(session.liveRejectedVariantIds ?? []),
+              rejectedOffer.selection.offer.variantId,
+            ]),
+          ];
+        }
+        return prepareLiveOffer(chatId, senderHandle, session, turn);
+      }
+      if (!explicitlyAuthorizesPayment(message)) {
+        return session.stage === "awaiting_live_offer_review"
+          ? "I have not requested the address-bound estimate yet. Should I use the selected saved Prava address to estimate shipping, tax, total, and delivery timing for this item?"
+          : `Nothing has been purchased. Do you approve the address-bound estimate of ${session.liveQuote?.total.currency ?? "the quoted currency"} ${session.liveQuote?.total.amount ?? "and total"} for secure Prava approval?`;
+      }
+      if (session.stage === "awaiting_live_offer_review") {
+        return createLiveQuote(session, chatId, turn);
+      }
+      const purchaseAuthorizationEventId = liveAuthorizationEventId(
+        "purchase",
+        chatId,
+        turn,
+      );
+      if (!purchaseAuthorizationEventId) {
+        return "I couldn’t bind that approval to a verified chat turn, so I did not create payment approval. Can you reply yes once more?";
+      }
+      const requiredIncidentDetails = missingIncidentDetails(session);
+      if (requiredIncidentDetails.length > 0) {
+        session.livePurchaseAuthorizationEventId = purchaseAuthorizationEventId;
+        session.liveResumeAfterIncident = true;
+        session.stage = "awaiting_incident_details";
+        const lines = [
+          ...requiredIncidentDetails.map((field) =>
+            field === "airline"
+              ? "• Airline"
+              : "• Exact arrival airport or code",
+          ),
+          ...(!session.baggageReference
+            ? ["• Baggage reference, if you have it"]
+            : []),
+        ];
+        return `Thanks. I recorded your approval of the quoted estimate. Before I open Prava, I need these remaining recovery details:\n\n${lines.join("\n")}\n\nWhat should I record?`;
+      }
+      if (!session.baggageReference) session.baggageReference = "not provided";
+      return createLiveApproval(
+        session,
+        chatId,
+        turn,
+        purchaseAuthorizationEventId,
+      );
+    }
 
-    if (update.action === "cancel") {
+    let update =
+      updateOverride ??
+      (session.stage === "awaiting_delivery_address"
+        ? fallbackRecoveryTurnUpdate(message, session.stage, session.sizes)
+        : await recoveryInterpreter.interpret({
+            message: modelMessage,
+            history,
+            stage: session.stage,
+            currentSizes: session.sizes,
+          }));
+    if (!(await isCurrentTurn(turn))) return "";
+
+    if (isCancellation(message)) {
       recoverySessions.delete(chatId);
       return "Of course. I’ll stop here, and nothing has been ordered or submitted.";
+    }
+    if (update.action === "cancel") {
+      update = { ...update, action: "unclear" };
     }
 
     mergeRecoveryUpdate(session, update, message);
@@ -2300,48 +3784,68 @@ export function createOpenAIReplyGenerator(
         return "Before I use the notice, can you confirm the airline, airport, and baggage reference I read are correct?";
       }
       session.noticeConfirmed = true;
+      const noticeResumeStage = session.noticeResumeStage ?? null;
+      session.noticeResumeStage = null;
+      if (noticeResumeStage) {
+        session.stage = noticeResumeStage;
+        return continueRecovery(
+          chatId,
+          senderHandle,
+          message,
+          history,
+          session,
+          turn,
+          session.noticeEvidence
+            ? recoveryUpdateFromNotice(session.noticeEvidence)
+            : undefined,
+        );
+      }
       session.stage = "awaiting_recovery_context";
       return recoveryContextFallback(session.originalMessage);
     }
 
     if (session.stage === "awaiting_recovery_context") {
-      if (session.catalogAreaRequired) {
-        const requiredArea = session.catalogAreaRequired;
-        if (isNegativeReply(message) || session.wantsEssentials === false) {
-          session.catalogAreaRequired = null;
-          session.deliveryArea = null;
-          session.wantsEssentials = false;
-          session.stage = "awaiting_incident_details";
-          return claimOnlyIncidentDetailsFallback();
-        }
-        if (
-          new RegExp(`\\b${escapeRegExp(requiredArea)}\\b`, "i").test(message) ||
-          new RegExp(`\\b${escapeRegExp(requiredArea)}\\b`, "i").test(
-            session.deliveryArea ?? "",
-          )
-        ) {
-          session.deliveryArea = requiredArea;
-          session.catalogAreaRequired = null;
-        } else {
-          session.deliveryArea = null;
-          return catalogAreaAlternativePrompt(requiredArea);
-        }
-      }
+      // Older builds forced non-Boston sandbox cases into a city-switch loop.
+      // Retire that persisted gate. If the old build already discarded the
+      // destination, the normal context prompt asks for it once more.
+      session.catalogAreaRequired = null;
       const missing = missingRecoveryContext(session);
       if (missing.length > 0) return recoveryContextFollowUp(session);
       if (session.wantsEssentials === false) {
         session.stage = "awaiting_incident_details";
       } else if (missingSizeRequirements(session).length === 0) {
-        return presentRecoveryOption(chatId, senderHandle, message, history, session);
+        if (runtimeOptions.liveCommerce) {
+          session.stage = "awaiting_delivery_address";
+          return deliveryAddressPrompt();
+        }
+        return presentRecoveryOption(
+          chatId,
+          senderHandle,
+          modelMessage,
+          history,
+          session,
+          turn,
+        );
       } else {
-        return requestRecoverySizes(message, history, session);
+        return requestRecoverySizes(modelMessage, history, session, turn);
       }
     }
 
     if (session.stage === "awaiting_size_confirmation") {
       const missing = missingSizeRequirements(session);
       if (missing.length === 0) {
-        return presentRecoveryOption(chatId, senderHandle, message, history, session);
+        if (runtimeOptions.liveCommerce) {
+          session.stage = "awaiting_delivery_address";
+          return deliveryAddressPrompt();
+        }
+        return presentRecoveryOption(
+          chatId,
+          senderHandle,
+          modelMessage,
+          history,
+          session,
+          turn,
+        );
       }
       const workflowContext = [
         `Current sizes: ${JSON.stringify(session.sizes)}.`,
@@ -2350,7 +3854,7 @@ export function createOpenAIReplyGenerator(
       ].join(" ");
       return replyWithContract({
         instructions: `${TAVRA_REPLY_INSTRUCTIONS} ${RECOVERY_SIZE_CLARIFICATION_INSTRUCTIONS}`,
-        input: buildReplyInput(message, history, null, workflowContext),
+        input: buildReplyInput(modelMessage, history, null, workflowContext),
         validate: (draft) => recoverySizeClarificationIssues(draft, missing),
         contractName: "size-confirmation follow-up",
         fallback: recoverySizeFallback(session, missing),
@@ -2365,7 +3869,14 @@ export function createOpenAIReplyGenerator(
       );
       if (update.action === "request_change") {
         if (hasExplicitSizeChange && missingSizeRequirements(session).length === 0) {
-          return presentRecoveryOption(chatId, senderHandle, message, history, session);
+          return presentRecoveryOption(
+            chatId,
+            senderHandle,
+            modelMessage,
+            history,
+            session,
+            turn,
+          );
         }
         try {
           return await modelReply({
@@ -2376,7 +3887,7 @@ export function createOpenAIReplyGenerator(
               "Do not ask for airline, airport, or baggage-reference details yet.",
             ].join(" "),
             input: buildReplyInput(
-              message,
+              modelMessage,
               history,
               null,
               `Current confirmed sizes: ${JSON.stringify(session.sizes)}.`,
@@ -2404,6 +3915,14 @@ export function createOpenAIReplyGenerator(
     }
 
     if (session.stage === "awaiting_delivery_address") {
+      if (/\bclaim only\b/i.test(message)) {
+        session.wantsEssentials = false;
+        session.liveResumeAfterIncident = false;
+        session.stage = "awaiting_incident_details";
+        return runtimeOptions.liveCommerce
+          ? liveClaimOnlyIncidentDetailsFallback()
+          : claimOnlyIncidentDetailsFallback();
+      }
       if (asksToShareLocation(message)) {
         if (!runtimeOptions.locationProvider) {
           return "Location sharing is unavailable right now. Please send the full street or hotel address, including the room or front desk.";
@@ -2445,19 +3964,39 @@ export function createOpenAIReplyGenerator(
         }
       }
 
-      if (!session.deliveryAddress && looksLikeDeliveryAddress(message.trim())) {
+      if (
+        !isUsableDeliveryAddress(session.deliveryAddress) &&
+        looksLikeDeliveryAddress(message.trim())
+      ) {
         session.deliveryAddress = cleanDeliveryAddress(message);
         session.deliveryAddressSource = "message";
+        session.locationRequestedAt = null;
+        session.sandboxMerchantCheckout = null;
       }
 
-      if (!session.deliveryAddress && runtimeOptions.locationProvider) {
+      const isSharedLocationFollowUp = Boolean(
+        session.locationRequestedAt &&
+          /^\s*(?:shared|done|sent(?: it)?|just shared|i shared(?: it)?)\s*[.!]?\s*$/i.test(
+            message,
+          ),
+      );
+      let locationWithoutAddress: SharedChatLocation | null = null;
+      if (!isUsableDeliveryAddress(session.deliveryAddress) && runtimeOptions.locationProvider) {
         try {
-          const location = await retrieveSharedLocation(chatId, senderHandle);
+          const location = await retrieveSharedLocation(
+            chatId,
+            senderHandle,
+            isSharedLocationFollowUp ? 5 : 1,
+            isSharedLocationFollowUp,
+          );
           const fresh = isFreshSharedLocation(location?.updatedAt ?? null);
           if (location?.address && fresh) {
             session.deliveryAddress = cleanDeliveryAddress(location.address);
             session.deliveryAddressSource = "linq_location";
             session.locationRequestedAt = null;
+            session.sandboxMerchantCheckout = null;
+          } else if (location) {
+            locationWithoutAddress = location;
           }
         } catch (error) {
           const details = linqLocationErrorDetails(error);
@@ -2476,12 +4015,46 @@ export function createOpenAIReplyGenerator(
         }
       }
 
-      if (!session.deliveryAddress) return deliveryAddressPrompt();
+      if (!isUsableDeliveryAddress(session.deliveryAddress)) {
+        if (isSharedLocationFollowUp) {
+          if (locationWithoutAddress?.locality) {
+            return `I received your approximate location near ${cleanWorkflowValue(locationWithoutAddress.locality)}, but Apple still hasn’t provided a deliverable street address. Please type the hotel, building, or street address.`;
+          }
+          return "I still can’t retrieve a deliverable street address from the shared location. Please type the hotel, building, or street address.";
+        }
+        return deliveryAddressPrompt();
+      }
       if (!session.deliveryAddressConfirmed) {
         if (isAffirmativeReply(message)) {
           session.deliveryAddressConfirmed = true;
         } else {
           return deliveryAddressProposal(session);
+        }
+      }
+      if (runtimeOptions.liveCommerce) {
+        return prepareLiveOffer(chatId, senderHandle, session, turn);
+      }
+      if (
+        runtimeOptions.sandboxMerchant &&
+        session.sandboxMerchantOffer &&
+        session.email
+      ) {
+        try {
+          await prepareSandboxMerchantCheckout(session, senderHandle, turn);
+          if (!(await isCurrentTurn(turn))) return "";
+        } catch (error) {
+          console.warn(
+            JSON.stringify({
+              scope: "sandbox_merchant_quote",
+              status: "unavailable",
+              caseRef: session.caseId,
+              error:
+                error instanceof Error
+                  ? error.message
+                  : "Unknown merchant quote error",
+            }),
+          );
+          return "I couldn’t verify the merchant’s exact total for this address, so I did not start payment. Reply retry to check it again, or say claim only to continue without a purchase.";
         }
       }
       session.stage = "awaiting_incident_details";
@@ -2501,7 +4074,7 @@ export function createOpenAIReplyGenerator(
         return replyWithContract({
           instructions: `${TAVRA_REPLY_INSTRUCTIONS} ${RECOVERY_INCIDENT_INSTRUCTIONS}`,
           input: buildReplyInput(
-            message,
+            modelMessage,
             history,
             null,
             `Known incident details: airline ${session.airline ?? "missing"}; arrival airport ${session.arrivalAirport ?? "missing"}; baggage reference ${session.baggageReference ?? "missing"}. Ask only for: ${missing.join(", ")}.`,
@@ -2583,6 +4156,22 @@ export function createOpenAIReplyGenerator(
             : cleanWorkflowValue(session.baggageReference);
         return `I’ve created claim draft ${session.caseId}:\n\n• Airline: ${cleanWorkflowValue(session.airline as string)}\n• Arrival airport: ${cleanWorkflowValue(session.arrivalAirport as string)}\n• Baggage reference: ${reference}\n\nNo claim has been submitted. Send the delay notice and any receipts when you want me to complete the evidence packet.`;
       }
+      if (runtimeOptions.liveCommerce && session.liveResumeAfterIncident) {
+        session.liveResumeAfterIncident = false;
+        if (
+          session.liveOffer &&
+          session.liveQuote &&
+          session.livePurchaseAuthorizationEventId
+        ) {
+          return createLiveApproval(
+            session,
+            chatId,
+            turn,
+            session.livePurchaseAuthorizationEventId,
+          );
+        }
+        return "The approved live quote is no longer available, so I did not create payment approval. Should I search again?";
+      }
       session.stage = "awaiting_email_confirmation";
       return emailConfirmationReply(session);
     }
@@ -2591,8 +4180,23 @@ export function createOpenAIReplyGenerator(
   }
 
   return {
-    async generateReply({ message, senderHandle, chatId, attachments = [] }) {
+    async generateReply({
+      message,
+      senderHandle,
+      chatId,
+      attachments = [],
+      turn,
+    }) {
+      await restoreRecoverySession(chatId);
+      const sessionAtTurnStart = recoverySessions.get(chatId);
+      if (sessionAtTurnStart) {
+        // Any newer inbound turn supersedes the previously rendered approval
+        // summary. Text authorization still works through the normal state path.
+        sessionAtTurnStart.paymentAuthorizationMessageId = null;
+      }
+      try {
       const history = [...(conversations.get(chatId) ?? [])];
+      const activeRecoveryAtStart = recoverySessions.get(chatId);
       let noticeEvidence: BaggageNoticeEvidence | null = null;
       if (attachments.length > 0) {
         try {
@@ -2601,6 +4205,7 @@ export function createOpenAIReplyGenerator(
             model,
             message,
             attachments,
+            [activeRecoveryAtStart?.deliveryAddress],
           );
         } catch (error) {
           console.warn(
@@ -2611,6 +4216,19 @@ export function createOpenAIReplyGenerator(
             }),
           );
         }
+      }
+      if (activeRecoveryAtStart && noticeEvidence?.isBaggageNotice) {
+        mergeBaggageNoticeEvidence(activeRecoveryAtStart, noticeEvidence);
+      }
+      if (!(await isCurrentTurn(turn))) return "";
+      if (
+        activeRecoveryAtStart &&
+        activeRecoveryAtStart.stage !== "awaiting_incident_details" &&
+        !message.trim() &&
+        attachments.length > 0 &&
+        !noticeEvidence?.isBaggageNotice
+      ) {
+        return "";
       }
       if (!message.trim() && attachments.length > 0 && !noticeEvidence) {
         const reply =
@@ -2641,12 +4259,26 @@ export function createOpenAIReplyGenerator(
         .filter(Boolean)
         .join("\n");
 
+      const sandboxClaimReply = await submitPendingSandboxClaim(
+        chatId,
+        senderHandle,
+        message,
+        turn,
+      );
+      if (sandboxClaimReply !== null) {
+        if (!(await isCurrentTurn(turn))) return "";
+        const reply = limitReply(sandboxClaimReply);
+        remember(chatId, message, reply);
+        return reply;
+      }
+
       if (
         runtimeOptions.caseLedger &&
         (asksToPrepareAirlineClaim(message) ||
           explicitlyAuthorizesClaimHandoff(message))
       ) {
         const latest = await runtimeOptions.caseLedger.getLatestForChat(chatId);
+        if (!(await isCurrentTurn(turn))) return "";
         const sameEmployee =
           latest &&
           latest.employeePhone.replace(/\D/g, "") ===
@@ -2659,6 +4291,7 @@ export function createOpenAIReplyGenerator(
                 caseId: latest.caseId,
                 authorizationEventId: `chat-authorization:${chatId}:${randomUUID()}`,
               });
+              if (!(await isCurrentTurn(turn))) return "";
             } catch {
               record =
                 (await runtimeOptions.caseLedger.get(latest.caseId)) ?? latest;
@@ -2673,30 +4306,22 @@ export function createOpenAIReplyGenerator(
       const activeRecovery = recoverySessions.get(chatId);
       if (activeRecovery) {
         if (noticeEvidence?.isBaggageNotice) {
-          const existingAttachmentIds =
-            activeRecovery.noticeEvidence?.attachmentIds ?? [];
-          activeRecovery.noticeEvidence = {
-            ...noticeEvidence,
-            attachmentIds: [
-              ...new Set([
-                ...existingAttachmentIds,
-                ...noticeEvidence.attachmentIds,
-              ]),
-            ],
-          };
+          mergeBaggageNoticeEvidence(activeRecovery, noticeEvidence);
           if (activeRecovery.stage === "awaiting_notice_confirmation") {
             activeRecovery.noticeConfirmed = false;
-            if (!activeRecovery.airline) {
-              activeRecovery.airline = noticeEvidence.airline;
-            }
-            if (!activeRecovery.arrivalAirport) {
-              activeRecovery.arrivalAirport = noticeEvidence.arrivalAirport;
-            }
-            if (!activeRecovery.baggageReference) {
-              activeRecovery.baggageReference = noticeEvidence.baggageReference;
-            }
             const reply = baggageNoticeReviewReply(noticeEvidence);
             remember(chatId, message.trim() || "[Baggage notice attached]", reply);
+            return reply;
+          }
+          if (!message.trim()) {
+            if (activeRecovery.stage !== "awaiting_incident_details") {
+              return "";
+            }
+            activeRecovery.noticeResumeStage = activeRecovery.stage;
+            activeRecovery.stage = "awaiting_notice_confirmation";
+            activeRecovery.noticeConfirmed = false;
+            const reply = baggageNoticeReviewReply(noticeEvidence);
+            remember(chatId, "[Baggage notice attached]", reply);
             return reply;
           }
           const continuation = await continueRecovery(
@@ -2705,7 +4330,9 @@ export function createOpenAIReplyGenerator(
             message.trim(),
             history,
             activeRecovery,
+            turn,
           );
+          if (!(await isCurrentTurn(turn))) return "";
           const reply = limitReply(
             `I saved the baggage notice with this recovery. I’ll keep us on the current step so nothing gets reset.\n\n${continuation}`,
           );
@@ -2718,18 +4345,22 @@ export function createOpenAIReplyGenerator(
           effectiveMessage,
           history,
           activeRecovery,
+          turn,
         );
+        if (!(await isCurrentTurn(turn))) return "";
         remember(chatId, message.trim() || "[Attachment]", reply);
         return reply;
       }
 
       const intent = await router.classify({ message: effectiveMessage, history });
+      if (!(await isCurrentTurn(turn))) return "";
       if (
         runtimeOptions.caseLedger &&
         asksForRecoveryStatus(message) &&
         (intent === "team_recovery" || intent === "policy")
       ) {
         const latest = await runtimeOptions.caseLedger.getLatestForChat(chatId);
+        if (!(await isCurrentTurn(turn))) return "";
         if (latest) {
           const reply = limitReply(recoveryStatusReply(latest));
           remember(chatId, message, reply);
@@ -2746,6 +4377,7 @@ export function createOpenAIReplyGenerator(
           effectiveMessage,
           "profile",
         );
+        if (!(await isCurrentTurn(turn))) return "";
         if (!profile) {
           remember(chatId, message, UNKNOWN_EMPLOYEE_REPLY);
           return UNKNOWN_EMPLOYEE_REPLY;
@@ -2761,6 +4393,7 @@ export function createOpenAIReplyGenerator(
             ? "awaiting_notice_confirmation"
             : "awaiting_recovery_context",
           employeeId: profile.employeeId,
+          employeeAllowance: extractEmployeeAllowance(profile.context),
           originalMessage: message.trim() || "Attached baggage-disruption notice",
           sizes,
           confirmed: {
@@ -2775,6 +4408,11 @@ export function createOpenAIReplyGenerator(
           noticeConfirmed: false,
           wantsEssentials: null,
           needBy: explicitContext.needBy,
+          needByIso: parseRecoveryDeadlineIso(
+            explicitContext.needBy,
+            runtimeOptions.timeZone,
+            runtimeOptions.now?.() ?? new Date(),
+          ),
           deliveryArea: explicitContext.deliveryArea,
           catalogAreaRequired: null,
           deliveryAddress: null,
@@ -2784,8 +4422,18 @@ export function createOpenAIReplyGenerator(
           email,
           emailConfirmed: false,
           optionTotal: null,
+          optionCurrency: "USD",
           proposedProducts: null,
+          sandboxMerchantOffer: null,
+          sandboxMerchantCheckout: null,
           checkout: null,
+          liveAddress: null,
+          liveOffer: null,
+          liveQuote: null,
+          liveRejectedVariantIds: [],
+          liveResumeAfterIncident: false,
+          livePurchaseAuthorizationEventId: null,
+          paymentAuthorizationMessageId: null,
         };
         const reply = noticeEvidence?.isBaggageNotice
           ? baggageNoticeReviewReply(noticeEvidence)
@@ -2802,6 +4450,7 @@ export function createOpenAIReplyGenerator(
               contractName: "recovery context intake",
               fallback: recoveryContextFallback(effectiveMessage),
             });
+        if (!(await isCurrentTurn(turn))) return "";
         recoverySessions.set(chatId, session);
         remember(
           chatId,
@@ -2815,6 +4464,7 @@ export function createOpenAIReplyGenerator(
       const knowledge = scope
         ? await knowledgeProvider.getKnowledge(senderHandle, effectiveMessage, scope)
         : null;
+      if (!(await isCurrentTurn(turn))) return "";
 
       if (scope && !knowledge) {
         remember(chatId, message, UNKNOWN_EMPLOYEE_REPLY);
@@ -2840,24 +4490,52 @@ export function createOpenAIReplyGenerator(
           }),
         );
       }
+      if (!(await isCurrentTurn(turn))) return "";
       remember(chatId, message.trim() || "[Attachment]", reply);
       return reply;
+      } finally {
+        await persistRecoverySession(chatId);
+      }
     },
     chatForLocationShare(senderHandle) {
       const now = Date.now();
-      for (const [chatId, session] of recoverySessions) {
-        if (
-          session.stage === "awaiting_delivery_address" &&
-          session.locationRequestedAt &&
-          now - session.locationRequestedAt <= 15 * 60 * 1000 &&
-          sameLinqHandle(session.senderHandle, senderHandle)
-        ) {
-          return chatId;
+      const matchingChat = (
+        entries: Iterable<readonly [string, RecoverySession]>,
+      ): string | null => {
+        for (const [chatId, session] of entries) {
+          if (
+            session.stage === "awaiting_delivery_address" &&
+            session.locationRequestedAt &&
+            now - session.locationRequestedAt <= 15 * 60 * 1000 &&
+            sameLinqHandle(session.senderHandle, senderHandle)
+          ) {
+            return chatId;
+          }
         }
-      }
-      return null;
+        return null;
+      };
+      const active = matchingChat(recoverySessions);
+      if (active) return active;
+      const list = runtimeOptions.recoveryStateStore?.list;
+      if (!list) return null;
+      return list.call(runtimeOptions.recoveryStateStore).then((stored) => {
+        const entries = stored.flatMap(({ chatId, state }) => {
+          const session = state as RecoverySession;
+          return session && typeof session === "object"
+            ? [[chatId, session] as const]
+            : [];
+        });
+        const chatId = matchingChat(entries);
+        if (chatId) {
+          const session = entries.find(([candidate]) => candidate === chatId)?.[1];
+          if (session) recoverySessions.set(chatId, session);
+        }
+        return chatId;
+      });
     },
-    async generateLocationShareReply({ chatId, senderHandle, eventAt }) {
+    async generateLocationShareReply({ chatId, senderHandle, eventAt, turn }) {
+      await restoreRecoverySession(chatId);
+      try {
       const session = recoverySessions.get(chatId);
       if (
         !session ||
@@ -2875,11 +4553,19 @@ export function createOpenAIReplyGenerator(
         return null;
       }
 
-      const location = await retrieveSharedLocation(chatId, senderHandle, 5);
+      const location = await retrieveSharedLocation(
+        chatId,
+        senderHandle,
+        16,
+        true,
+      );
+      if (!(await isCurrentTurn(turn)) || !session.locationRequestedAt) {
+        return null;
+      }
       let reply: string;
       if (!location) {
         reply =
-          "Location sharing is on, but Apple hasn’t provided the address yet. Give it a moment and reply ‘shared’, or type the hotel or street address.";
+          "I still couldn’t retrieve a deliverable street address from Apple. Please type the hotel, building, or street address.";
       } else if (!location.address) {
         const locality = location.locality
           ? ` near ${cleanWorkflowValue(location.locality)}`
@@ -2892,32 +4578,115 @@ export function createOpenAIReplyGenerator(
         session.deliveryAddress = cleanDeliveryAddress(location.address);
         session.deliveryAddressSource = "linq_location";
         session.deliveryAddressConfirmed = false;
+        session.liveRejectedVariantIds = [];
         session.locationRequestedAt = null;
         reply = deliveryAddressProposal(session);
       }
       remember(chatId, "[Location shared]", reply);
       return reply;
+      } finally {
+        await persistRecoverySession(chatId);
+      }
     },
-    locationSharingStopped(senderHandle) {
+    async locationSharingStopped(senderHandle) {
+      const changedChatIds: string[] = [];
       for (const session of recoverySessions.values()) {
         if (sameLinqHandle(session.senderHandle, senderHandle)) {
           session.locationRequestedAt = null;
         }
       }
+      for (const [chatId, session] of recoverySessions) {
+        if (sameLinqHandle(session.senderHandle, senderHandle)) {
+          changedChatIds.push(chatId);
+        }
+      }
+      if (changedChatIds.length === 0 && runtimeOptions.recoveryStateStore?.list) {
+        const stored = await runtimeOptions.recoveryStateStore.list<RecoverySession>();
+        for (const { chatId, state } of stored) {
+          if (sameLinqHandle(state.senderHandle, senderHandle)) {
+            state.locationRequestedAt = null;
+            recoverySessions.set(chatId, state);
+            changedChatIds.push(chatId);
+          }
+        }
+      }
+      await Promise.all(changedChatIds.map((chatId) => persistRecoverySession(chatId)));
     },
     consumePresentation(chatId) {
       const presentation = pendingPresentations.get(chatId) ?? null;
       pendingPresentations.delete(chatId);
       return presentation;
     },
+    async recordSentReply({ chatId, messageId, reply }) {
+      await restoreRecoverySession(chatId);
+      const session = recoverySessions.get(chatId);
+      if (!session) return;
+      const isFinalAuthorizationSummary =
+        (session.stage === "awaiting_email_confirmation" ||
+          session.stage === "awaiting_payment_authorization") &&
+        reply.includes("Here’s the exact approval summary:") &&
+        reply.includes(
+          "Reply yes or react with 👍 to create the Prava approval for this summary",
+        );
+      if (!isFinalAuthorizationSummary) return;
+      session.paymentAuthorizationMessageId = messageId;
+      await persistRecoverySession(chatId);
+    },
+    async generateReactionReply({
+      chatId,
+      senderHandle,
+      targetMessageId,
+      turn,
+    }) {
+      await restoreRecoverySession(chatId);
+      try {
+        const session = recoverySessions.get(chatId);
+        if (
+          !session ||
+          !sameLinqHandle(session.senderHandle, senderHandle) ||
+          session.paymentAuthorizationMessageId !== targetMessageId ||
+          (session.stage !== "awaiting_email_confirmation" &&
+            session.stage !== "awaiting_payment_authorization")
+        ) {
+          return null;
+        }
+        if (!session.email) return null;
+
+        // Consume the tapback capability before creating checkout. The chat
+        // coordinator serializes same-chat events, and this durable mutation
+        // prevents a second reaction delivery from creating another approval.
+        session.paymentAuthorizationMessageId = null;
+        session.emailConfirmed = true;
+        session.stage = "awaiting_payment_authorization";
+        const reply = await createSecureCheckout(
+          chatId,
+          senderHandle,
+          session,
+          turn,
+        );
+        if (!(await isCurrentTurn(turn))) return "";
+        const limited = limitReply(reply);
+        remember(chatId, "[Thumbs-up approval]", limited);
+        return limited;
+      } finally {
+        await persistRecoverySession(chatId);
+      }
+    },
     recordExternalReply(chatId, reply) {
+      const knownDeliveryAddress = recoverySessions.get(chatId)?.deliveryAddress;
       const history = [
         ...(conversations.get(chatId) ?? []),
-        { role: "assistant", text: limitReply(reply) } as const,
+        {
+          role: "assistant",
+          text: redactPrivateDeliveryContextForOpenAI(limitReply(reply), [
+            knownDeliveryAddress,
+          ]),
+        } as const,
       ];
       conversations.set(chatId, history.slice(-MAX_HISTORY_TURNS));
       recoverySessions.delete(chatId);
       pendingPresentations.delete(chatId);
+      void persistRecoverySession(chatId);
     },
   };
 }

@@ -35,6 +35,15 @@ export interface IMessageAppCardUpdate {
   layout: IMessageAppCardLayout;
 }
 
+export type IMessageAppCardState =
+  | "review"
+  | "approval_pending"
+  | "authorized"
+  | "sandbox_validated"
+  | "order_placed"
+  | "failed"
+  | "reconciliation_required";
+
 const TEAM_ID = /^[A-Z0-9]{10}$/;
 const BUNDLE_ID = /^(?!\.)(?!.*\.\.)[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$/;
 
@@ -70,8 +79,46 @@ function totalQuantity(products: readonly PravaProduct[]): number {
   return products.reduce((sum, product) => sum + product.quantity, 0);
 }
 
-function firstImage(media: readonly ResolvedProductMedia[]): string | undefined {
-  return media[0]?.url;
+function firstMedia(
+  media: readonly ResolvedProductMedia[],
+): ResolvedProductMedia | undefined {
+  return media[0];
+}
+
+function compactLabel(
+  value: string | undefined,
+  maximum: number,
+): string | undefined {
+  const normalized = value
+    ?.replace(/[—–]/g, "-")
+    .replace(/--+/g, "-")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!normalized) return undefined;
+  return normalized.length <= maximum
+    ? normalized
+    : `${normalized.slice(0, maximum - 1).trimEnd()}\u2026`;
+}
+
+function cardStateLabel(
+  state: IMessageAppCardState,
+): string {
+  switch (state) {
+    case "review":
+      return "Review, not purchased";
+    case "approval_pending":
+      return "Approval pending";
+    case "authorized":
+      return "Authorized, confirming order";
+    case "sandbox_validated":
+      return "Expected decline recorded";
+    case "order_placed":
+      return "Order placed";
+    case "failed":
+      return "No order confirmed";
+    case "reconciliation_required":
+      return "Order status under review";
+  }
 }
 
 export function createCheckoutIMessageAppCard(input: {
@@ -82,10 +129,29 @@ export function createCheckoutIMessageAppCard(input: {
   currency: string;
   products: readonly PravaProduct[];
   productMedia: readonly ResolvedProductMedia[];
+  /** Merchant and variant are optional so existing sandbox callers remain valid. */
+  merchantName?: string;
+  primaryVariant?: string;
+  state?: IMessageAppCardState;
 }): IMessageAppCard {
   const identity = validateIMessageAppIdentity(input.identity);
   const count = totalQuantity(input.products);
-  const imageUrl = firstImage(input.productMedia);
+  const media = firstMedia(input.productMedia);
+  const imageUrl = media?.url;
+  const state = input.state ?? "review";
+  const merchantName = compactLabel(
+    input.merchantName ??
+      (media?.source.kind === "official_merchant_asset"
+        ? media.source.label
+        : undefined),
+    64,
+  );
+  const primaryProduct = input.products[0];
+  const primaryVariant = compactLabel(input.primaryVariant, 90);
+  const productLabel = compactLabel(
+    primaryVariant ?? primaryProduct?.description,
+    100,
+  );
   return {
     checkoutId: input.checkoutId,
     identity,
@@ -93,15 +159,21 @@ export function createCheckoutIMessageAppCard(input: {
     fallbackText: "Open secure Tavra approval",
     interactive: true,
     layout: {
-      caption: "Tavra recovery",
-      subcaption: `${count} ${count === 1 ? "item" : "items"} ready for review`,
+      caption: merchantName ?? "Tavra recovery",
+      subcaption:
+        productLabel ??
+        `${count} ${count === 1 ? "item" : "items"} ready for review`,
       trailingCaption: `${input.currency} ${input.totalAmount}`,
-      trailingSubcaption: "Secure approval",
+      trailingSubcaption: cardStateLabel(state),
       ...(imageUrl
         ? {
             imageUrl,
-            imageTitle: "Recovery essentials",
-            imageSubtitle: "Review inside Messages",
+            imageTitle: compactLabel(
+              primaryProduct?.description ?? media?.lineItemDescription,
+              100,
+            ),
+            imageSubtitle:
+              merchantName ?? `${count} ${count === 1 ? "item" : "items"}`,
           }
         : {}),
     },
@@ -112,36 +184,78 @@ export function createCheckoutIMessageAppUpdate(input: {
   approvalUrl: string;
   totalAmount: string;
   currency: string;
-  status: "completed" | "failed" | "reconciliation_required";
-  merchantOutcome: "simulated" | "live" | "not_attempted";
+  status:
+    | "completed"
+    | "sandbox_validated"
+    | "failed"
+    | "reconciliation_required";
+  merchantOutcome:
+    | "simulated"
+    | "sandbox_merchant"
+    | "live"
+    | "not_attempted";
   productMedia: readonly ResolvedProductMedia[];
+  merchantName?: string;
+  primaryVariant?: string;
+  merchantOrderId?: string | null;
 }): IMessageAppCardUpdate {
-  const imageUrl = firstImage(input.productMedia);
+  const media = firstMedia(input.productMedia);
+  const imageUrl = media?.url;
   const completed = input.status === "completed";
-  const caption = completed
-    ? input.merchantOutcome === "live"
-      ? "Merchant order confirmed"
-      : "Sandbox approval complete"
-    : input.status === "reconciliation_required"
-      ? "Approval needs review"
-      : "Approval not completed";
-  const subcaption = completed
-    ? input.merchantOutcome === "live"
-      ? "Open for the latest fulfillment status"
-      : "No live merchant order was created"
-    : input.status === "reconciliation_required"
-      ? "No order is being claimed"
-      : "Nothing was ordered by Tavra";
+  const sandboxValidated = input.status === "sandbox_validated";
+  const state: IMessageAppCardState = sandboxValidated
+    ? "sandbox_validated"
+    : completed
+      ? "order_placed"
+      : input.status === "reconciliation_required"
+        ? "reconciliation_required"
+        : "failed";
+  const merchantName = compactLabel(
+    input.merchantName ??
+      (media?.source.kind === "official_merchant_asset"
+        ? media.source.label
+        : undefined),
+    64,
+  );
+  const caption = sandboxValidated
+    ? merchantName ?? "Merchant checkout tested"
+    : completed
+      ? input.merchantOutcome === "live"
+        ? merchantName ?? "Merchant order confirmed"
+        : "Approval complete"
+      : input.status === "reconciliation_required"
+        ? "Approval needs review"
+        : "Approval not completed";
+  const subcaption = sandboxValidated
+    ? "Approval complete, checkout attempted"
+    : completed
+      ? input.merchantOutcome === "live"
+        ? "Open for the latest fulfillment status"
+        : "Order placed"
+      : input.status === "reconciliation_required"
+        ? "No order is being claimed"
+        : "Nothing was ordered by Tavra";
+  const primaryVariant = compactLabel(input.primaryVariant, 90);
   return {
     url: input.approvalUrl,
     fallbackText: "Tavra approval status",
     interactive: true,
     layout: {
       caption,
-      subcaption,
+      subcaption:
+        primaryVariant ??
+        (input.merchantOrderId && input.merchantOutcome === "live"
+          ? `Order ${compactLabel(input.merchantOrderId, 48)}`
+          : subcaption),
       trailingCaption: `${input.currency} ${input.totalAmount}`,
-      trailingSubcaption: "Status updated",
-      ...(imageUrl ? { imageUrl } : {}),
+      trailingSubcaption: cardStateLabel(state),
+      ...(imageUrl
+        ? {
+            imageUrl,
+            imageTitle: compactLabel(media?.lineItemDescription, 100),
+            imageSubtitle: merchantName,
+          }
+        : {}),
     },
   };
 }

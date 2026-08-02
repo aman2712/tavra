@@ -17,20 +17,20 @@ test("recognizes expired and missing Dev Tunnels authentication", () => {
 test("parses a VS Code forwarded-port URL", () => {
   assert.deepEqual(
     parseDevTunnelTarget(
-      new URL("https://pcjfd1p7-3000.euw.devtunnels.ms"),
+      new URL("https://tavratest-3000.euw.devtunnels.ms"),
       3000,
     ),
     {
-      publicHostToken: "pcjfd1p7",
+      publicHostToken: "tavratest",
       port: 3000,
-      publicOrigin: "https://pcjfd1p7-3000.euw.devtunnels.ms",
+      publicOrigin: "https://tavratest-3000.euw.devtunnels.ms",
     },
   );
 });
 
 test("resolves the public hostname to the account's actual tunnel ID", () => {
   const target = parseDevTunnelTarget(
-    new URL("https://pcjfd1p7-3000.euw.devtunnels.ms"),
+    new URL("https://tavratest-3000.euw.devtunnels.ms"),
     3000,
   );
   assert.equal(
@@ -40,7 +40,7 @@ test("resolves the public hostname to the account's actual tunnel ID", () => {
         ports: [
           {
             portNumber: 3000,
-            portUri: "https://pcjfd1p7-3000.euw.devtunnels.ms/",
+            portUri: "https://tavratest-3000.euw.devtunnels.ms/",
           },
         ],
       },
@@ -51,7 +51,7 @@ test("resolves the public hostname to the account's actual tunnel ID", () => {
 
 test("resolves one offline tunnel when Microsoft omits its public URI", () => {
   const target = parseDevTunnelTarget(
-    new URL("https://pcjfd1p7-3000.euw.devtunnels.ms"),
+    new URL("https://tavratest-3000.euw.devtunnels.ms"),
     3000,
   );
   assert.equal(
@@ -67,7 +67,7 @@ test("resolves one offline tunnel when Microsoft omits its public URI", () => {
 
 test("does not guess between multiple offline tunnels on the same port", () => {
   const target = parseDevTunnelTarget(
-    new URL("https://pcjfd1p7-3000.euw.devtunnels.ms"),
+    new URL("https://tavratest-3000.euw.devtunnels.ms"),
     3000,
   );
   assert.equal(
@@ -83,7 +83,7 @@ test("rejects the wrong forwarded port", () => {
   assert.throws(
     () =>
       parseDevTunnelTarget(
-        new URL("https://pcjfd1p7-4000.euw.devtunnels.ms"),
+        new URL("https://tavratest-4000.euw.devtunnels.ms"),
         3000,
       ),
     /forwards port 4000, but PORT is 3000/,

@@ -59,7 +59,7 @@ public struct CheckoutSummaryClient: Sendable {
         }
     }
 
-    public func productImageData(at url: URL, for link: CheckoutLink) async throws -> Data {
+    public func productImage(at url: URL, for link: CheckoutLink) async throws -> CheckoutProductImage {
         guard link.allowsProductImage(url) else {
             throw CheckoutClientError.invalidProductImage
         }
@@ -68,7 +68,7 @@ public struct CheckoutSummaryClient: Sendable {
             cachePolicy: .reloadIgnoringLocalAndRemoteCacheData,
             timeoutInterval: 15
         )
-        request.setValue("image/png,image/jpeg,image/webp,image/heic,image/heif", forHTTPHeaderField: "Accept")
+        request.setValue(CheckoutImagePolicy.acceptHeader, forHTTPHeaderField: "Accept")
         let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse else {
             throw CheckoutClientError.invalidHTTPResponse
@@ -81,19 +81,24 @@ public struct CheckoutSummaryClient: Sendable {
         guard (200..<300).contains(http.statusCode) else {
             throw CheckoutClientError.httpStatus(http.statusCode)
         }
-        let allowedTypes = Set(["image/png", "image/jpeg", "image/webp", "image/heic", "image/heif"])
         guard let contentType = http.value(forHTTPHeaderField: "Content-Type")?
             .split(separator: ";", maxSplits: 1)
             .first?
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .lowercased(),
-              allowedTypes.contains(contentType) else {
+              CheckoutImagePolicy.acceptedMIMETypes.contains(contentType) else {
             throw CheckoutClientError.invalidProductImage
         }
-        guard data.count <= 8 * 1024 * 1024 else {
+        guard data.count <= CheckoutImagePolicy.maximumBytes else {
             throw CheckoutClientError.responseTooLarge
         }
-        return data
+        guard let image = CheckoutImagePolicy.downsampledImage(
+            from: data,
+            mimeType: contentType
+        ) else {
+            throw CheckoutClientError.invalidProductImage
+        }
+        return image
     }
 
     public static func ephemeralSession() -> URLSession {

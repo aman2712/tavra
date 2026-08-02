@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import type { MessageReceivedWebhookEvent } from "@linqapp/sdk/resources/webhooks";
+import type {
+  MessageReceivedWebhookEvent,
+  ReactionAddedWebhookEvent,
+} from "@linqapp/sdk/resources/webhooks";
 
 import { InMemoryProcessedEventStore } from "../src/event-store.js";
 import type {
@@ -92,6 +95,46 @@ function locationStartedEvent(
   };
 }
 
+function reactionAddedEvent(
+  overrides: {
+    eventId?: string;
+    chatId?: string;
+    messageId?: string;
+    sender?: string;
+    reactionType?: ReactionAddedWebhookEvent["data"]["reaction_type"];
+    customEmoji?: string | null;
+    reactedAt?: string;
+    isFromMe?: boolean;
+  } = {},
+): ReactionAddedWebhookEvent {
+  return {
+    api_version: "v3",
+    webhook_version: "2026-02-03",
+    event_type: "reaction.added",
+    event_id: overrides.eventId ?? "evt-reaction-added",
+    created_at: overrides.reactedAt ?? "2026-08-02T12:00:00Z",
+    trace_id: "trace-reaction-added",
+    partner_id: "partner-1",
+    data: {
+      is_from_me: overrides.isFromMe ?? false,
+      reaction_type: overrides.reactionType ?? "like",
+      chat_id: overrides.chatId ?? "chat-approval",
+      message_id: overrides.messageId ?? "message-approval-summary",
+      custom_emoji: overrides.customEmoji ?? null,
+      from_handle: {
+        id: "sender-1",
+        handle: overrides.sender ?? "+971501234567",
+        is_me: false,
+        joined_at: "2026-08-01T12:00:00Z",
+        left_at: null,
+        service: "iMessage",
+      },
+      reacted_at: overrides.reactedAt ?? "2026-08-02T12:00:00Z",
+      service: "iMessage",
+    },
+  };
+}
+
 test("extracts and trims inbound text", () => {
   assert.equal(textFromMessage(event({ text: "  hello  " })), "hello");
 });
@@ -107,7 +150,11 @@ test("passes sender and chat context and sends one reply for duplicate deliverie
   const generator: ReplyGenerator = {
     async generateReply(request) {
       activity.push("generate");
-      generations.push(request);
+      generations.push({
+        message: request.message,
+        senderHandle: request.senderHandle,
+        chatId: request.chatId,
+      });
       return "Check your airline's app for the latest departure time.";
     },
   };
@@ -141,7 +188,6 @@ test("passes sender and chat context and sends one reply for duplicate deliverie
       message: "My flight is delayed",
       senderHandle: "+971501234567",
       chatId: "chat-1",
-      attachments: [],
     },
   ]);
   assert.deepEqual(sends, [
@@ -154,29 +200,79 @@ test("passes sender and chat context and sends one reply for duplicate deliverie
   assert.deepEqual(activity, ["typing:start", "generate", "send"]);
 });
 
-test("turns a Linq location-sharing webhook into one deterministic chat reply", async () => {
-  const sends: Array<{ chatId: string; eventId: string; text: string }> = [];
-  const locationCalls: Array<{
+test("treats one inbound thumbs-up tapback as approval for its exact target", async () => {
+  const reactions: Array<{
     chatId: string;
     senderHandle: string;
-    eventAt: string;
+    targetMessageId: string;
   }> = [];
+  const sends: Array<{ eventId: string; text: string }> = [];
+  const recorded: string[] = [];
   const generator: ReplyGenerator = {
     async generateReply() {
-      throw new Error("ordinary message generation should not run");
+      throw new Error("ordinary generation should not run for a reaction");
     },
-    chatForLocationShare(senderHandle) {
-      return senderHandle === "+971501234567" ? "chat-location" : null;
+    async generateReactionReply(request) {
+      reactions.push({
+        chatId: request.chatId,
+        senderHandle: request.senderHandle,
+        targetMessageId: request.targetMessageId,
+      });
+      return "Your secure Prava approval is ready.";
     },
-    async generateLocationShareReply(request) {
-      locationCalls.push(request);
-      return "I found 50 Park Plaza. Is this the exact delivery address?";
+    recordSentReply(request) {
+      recorded.push(request.messageId);
     },
   };
   const sender: LinqMessageSender = {
-    async sendText(chatId, eventId, text) {
-      sends.push({ chatId, eventId, text });
-      return { messageId: "out-location" };
+    async sendText(_chatId, eventId, text) {
+      sends.push({ eventId, text });
+      return { messageId: "out-reaction-approval" };
+    },
+  };
+  const processEvent = createMessageReplyProcessor({
+    fromNumber: tavraNumber,
+    generator,
+    sender,
+    store: new InMemoryProcessedEventStore(),
+  });
+  const reaction = reactionAddedEvent();
+
+  const first = await processEvent(reaction);
+  const duplicate = await processEvent(reaction);
+
+  assert.equal(first.status, "sent");
+  assert.equal(duplicate.status, "duplicate");
+  assert.deepEqual(reactions, [
+    {
+      chatId: "chat-approval",
+      senderHandle: "+971501234567",
+      targetMessageId: "message-approval-summary",
+    },
+  ]);
+  assert.deepEqual(sends, [
+    {
+      eventId: "evt-reaction-added",
+      text: "Your secure Prava approval is ready.",
+    },
+  ]);
+  assert.deepEqual(recorded, ["out-reaction-approval"]);
+});
+
+test("ignores irrelevant reactions and a thumbs-up outside the final approval state", async () => {
+  let reactionCalls = 0;
+  const generator: ReplyGenerator = {
+    async generateReply() {
+      throw new Error("ordinary generation should not run for a reaction");
+    },
+    async generateReactionReply() {
+      reactionCalls += 1;
+      return null;
+    },
+  };
+  const sender: LinqMessageSender = {
+    async sendText() {
+      throw new Error("ignored reactions must not send a reply");
     },
   };
   const processEvent = createMessageReplyProcessor({
@@ -186,32 +282,241 @@ test("turns a Linq location-sharing webhook into one deterministic chat reply", 
     store: new InMemoryProcessedEventStore(),
   });
 
+  const laugh = await processEvent(
+    reactionAddedEvent({ eventId: "evt-laugh", reactionType: "laugh" }),
+  );
+  const custom = await processEvent(
+    reactionAddedEvent({
+      eventId: "evt-custom",
+      reactionType: "custom",
+      customEmoji: "✅",
+    }),
+  );
+  const outsideFinalState = await processEvent(
+    reactionAddedEvent({ eventId: "evt-like-outside-final-state" }),
+  );
+
+  assert.deepEqual(laugh, {
+    status: "ignored",
+    eventId: "evt-laugh",
+    reason: "reaction_not_relevant",
+  });
+  assert.deepEqual(custom, {
+    status: "ignored",
+    eventId: "evt-custom",
+    reason: "reaction_not_relevant",
+  });
+  assert.deepEqual(outsideFinalState, {
+    status: "ignored",
+    eventId: "evt-like-outside-final-state",
+    reason: "reaction_not_relevant",
+  });
+  assert.equal(reactionCalls, 1);
+});
+
+test("drops a thumbs-up reaction older than the latest chat turn", async () => {
+  let reactionCalls = 0;
+  const generator: ReplyGenerator = {
+    async generateReply() {
+      return "What should I change?";
+    },
+    async generateReactionReply() {
+      reactionCalls += 1;
+      return "must not send";
+    },
+  };
+  const sends: string[] = [];
+  const sender: LinqMessageSender = {
+    async sendText(_chatId, _eventId, text) {
+      sends.push(text);
+      return { messageId: `out-${sends.length}` };
+    },
+  };
+  const processEvent = createMessageReplyProcessor({
+    fromNumber: tavraNumber,
+    generator,
+    sender,
+    store: new InMemoryProcessedEventStore(),
+  });
+  await processEvent(
+    event({
+      eventId: "evt-newer-turn",
+      messageId: "message-newer-turn",
+      chatId: "chat-approval",
+      sentAt: "2026-08-02T12:10:00Z",
+    }),
+  );
+
+  const result = await processEvent(
+    reactionAddedEvent({
+      eventId: "evt-stale-reaction",
+      reactedAt: "2026-08-02T12:00:00Z",
+    }),
+  );
+
+  assert.deepEqual(result, {
+    status: "ignored",
+    eventId: "evt-stale-reaction",
+    reason: "stale_message",
+  });
+  assert.equal(reactionCalls, 0);
+  assert.deepEqual(sends, ["What should I change?"]);
+});
+
+test("acknowledges a location-sharing webhook immediately and sends one resolved address in the background", async () => {
+  const sends: Array<{ chatId: string; eventId: string; text: string }> = [];
+  const locationCalls: Array<{
+    chatId: string;
+    senderHandle: string;
+    eventAt: string;
+    revision: number | undefined;
+    isCurrent: boolean | undefined;
+  }> = [];
+  const activity: string[] = [];
+  const deferred: Array<() => Promise<void>> = [];
+  const generator: ReplyGenerator = {
+    async generateReply() {
+      throw new Error("ordinary message generation should not run");
+    },
+    chatForLocationShare(senderHandle) {
+      return senderHandle === "+971501234567" ? "chat-location" : null;
+    },
+    async generateLocationShareReply(request) {
+      activity.push("location:resolve");
+      locationCalls.push({
+        chatId: request.chatId,
+        senderHandle: request.senderHandle,
+        eventAt: request.eventAt,
+        revision: request.turn?.revision,
+        isCurrent: await request.turn?.isCurrent(),
+      });
+      return "I found 50 Park Plaza. Is this the exact delivery address?";
+    },
+  };
+  const sender: LinqMessageSender = {
+    async startTyping() {
+      activity.push("typing:start");
+    },
+    async stopTyping() {
+      activity.push("typing:stop");
+    },
+    async sendText(chatId, eventId, text) {
+      activity.push("send");
+      sends.push({ chatId, eventId, text });
+      return { messageId: "out-location" };
+    },
+  };
+  const processEvent = createMessageReplyProcessor({
+    fromNumber: tavraNumber,
+    generator,
+    sender,
+    store: new InMemoryProcessedEventStore(),
+    defer(task) {
+      deferred.push(task);
+    },
+  });
+
   const first = await processEvent(locationStartedEvent());
   const duplicate = await processEvent(locationStartedEvent());
 
   assert.deepEqual(first, {
-    status: "sent",
+    status: "ignored",
     eventId: "evt-location-started",
-    chatId: "chat-location",
-    messageId: "out-location",
+    reason: "location_pending",
   });
   assert.deepEqual(duplicate, {
     status: "duplicate",
     eventId: "evt-location-started",
   });
+  assert.equal(deferred.length, 1);
+  assert.deepEqual(locationCalls, []);
+  assert.deepEqual(sends, []);
+
+  await deferred[0]?.();
+
   assert.deepEqual(locationCalls, [
     {
       chatId: "chat-location",
       senderHandle: "+971501234567",
       eventAt: "2026-08-02T12:00:00Z",
+      revision: 1,
+      isCurrent: true,
     },
   ]);
   assert.deepEqual(sends, [
     {
       chatId: "chat-location",
-      eventId: "evt-location-started",
+      eventId: "evt-location-started-resolved",
       text: "I found 50 Park Plaza. Is this the exact delivery address?",
     },
+  ]);
+  assert.deepEqual(activity, [
+    "typing:start",
+    "location:resolve",
+    "send",
+    "typing:stop",
+  ]);
+});
+
+test("drops a deferred location reply after a newer chat turn supersedes it", async () => {
+  const deferred: Array<() => Promise<void>> = [];
+  const activity: string[] = [];
+  const processEvent = createMessageReplyProcessor({
+    fromNumber: tavraNumber,
+    generator: {
+      async generateReply() {
+        activity.push("message:generate");
+        return "I’ll use the address you typed.";
+      },
+      chatForLocationShare() {
+        return "chat-1";
+      },
+      async generateLocationShareReply() {
+        activity.push("location:resolve");
+        return "This stale location proposal must not be sent.";
+      },
+    },
+    sender: {
+      async startTyping() {
+        activity.push("typing:start");
+      },
+      async stopTyping() {
+        activity.push("typing:stop");
+      },
+      async sendText(_chatId, eventId) {
+        activity.push(`send:${eventId}`);
+        return { messageId: `out-${eventId}` };
+      },
+    },
+    store: new InMemoryProcessedEventStore(),
+    defer(task) {
+      deferred.push(task);
+    },
+  });
+
+  assert.deepEqual(await processEvent(locationStartedEvent()), {
+    status: "ignored",
+    eventId: "evt-location-started",
+    reason: "location_pending",
+  });
+  assert.equal(deferred.length, 1);
+
+  const newer = await processEvent(
+    event({
+      eventId: "evt-address-typed",
+      messageId: "message-address-typed",
+      text: "Use Solar Building, MBZUAI",
+      sentAt: "2026-08-02T12:00:01Z",
+    }),
+  );
+  assert.equal(newer.status, "sent");
+
+  await deferred[0]?.();
+
+  assert.deepEqual(activity, [
+    "typing:start",
+    "message:generate",
+    "send:evt-address-typed",
   ]);
 });
 
@@ -310,6 +615,43 @@ test("passes an image-only notice to the generator instead of discarding it", as
   const result = await processEvent(imageEvent);
   assert.equal(result.status, "sent");
   assert.equal(attachmentCount, 1);
+});
+
+test("records a silent evidence update without sending an unrelated chat reply", async () => {
+  let sends = 0;
+  const imageEvent = event({ eventId: "evt-silent-evidence", text: "" });
+  imageEvent.data.parts = [
+    {
+      type: "media",
+      id: "attachment-silent",
+      filename: "delay-notice.png",
+      mime_type: "image/png",
+      size_bytes: 12345,
+      url: "https://cdn.linqapp.com/attachments/delay-notice.png",
+    },
+  ];
+  const processEvent = createMessageReplyProcessor({
+    fromNumber: tavraNumber,
+    generator: {
+      async generateReply() {
+        return "";
+      },
+    },
+    sender: {
+      async sendText() {
+        sends += 1;
+        return { messageId: "must-not-send" };
+      },
+    },
+    store: new InMemoryProcessedEventStore(),
+  });
+
+  assert.deepEqual(await processEvent(imageEvent), {
+    status: "ignored",
+    eventId: "evt-silent-evidence",
+    reason: "evidence_recorded",
+  });
+  assert.equal(sends, 0);
 });
 
 test("ignores a delayed attachment webhook older than the latest turn in that chat", async () => {
@@ -411,7 +753,7 @@ test("deduplicates the same Linq message and attachment across new event ids", a
   assert.equal(await store.hasAttachment("attachment-shared"), true);
 });
 
-test("serializes simultaneous messages from the same chat", async () => {
+test("serializes same-chat work and suppresses an async reply superseded by a newer turn", async () => {
   const order: string[] = [];
   let releaseFirst: (() => void) | undefined;
   const firstCanFinish = new Promise<void>((resolve) => {
@@ -455,11 +797,16 @@ test("serializes simultaneous messages from the same chat", async () => {
   await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(order, ["start:first"]);
   releaseFirst?.();
-  await Promise.all([first, second]);
+  const [firstResult, secondResult] = await Promise.all([first, second]);
+  assert.deepEqual(firstResult, {
+    status: "ignored",
+    eventId: "evt-first",
+    reason: "superseded_turn",
+  });
+  assert.equal(secondResult.status, "sent");
   assert.deepEqual(order, [
     "start:first",
     "finish:first",
-    "send:first",
     "start:second",
     "finish:second",
     "send:second",
@@ -589,7 +936,80 @@ test("sends an interactive app card instead of its ordinary link fallback", asyn
   ]);
 });
 
-test("clears the typing indicator when reply generation fails", async () => {
+test("falls back to the secure link when the native app card cannot be delivered", async () => {
+  const activity: string[] = [];
+  const approvalUrl = "https://tavra.example/pay/checkout-card-fallback";
+  const processEvent = createMessageReplyProcessor({
+    fromNumber: tavraNumber,
+    generator: {
+      async generateReply() {
+        return "Your secure approval is ready.";
+      },
+      consumePresentation() {
+        return {
+          appCard: {
+            checkoutId: "checkout-card-fallback",
+            identity: {
+              name: "Tavra",
+              teamId: "A1B2C3D4E5",
+              bundleId: "com.example.tavra.MessagesExtension",
+            },
+            url: approvalUrl,
+            fallbackText: "Open secure Tavra approval",
+            interactive: true,
+            layout: { caption: "Tavra recovery" },
+          },
+        };
+      },
+    },
+    sender: {
+      async sendText() {
+        activity.push("text");
+        return { messageId: "out-text" };
+      },
+      async sendAppCard() {
+        activity.push("app:failed");
+        throw new Error("extension unavailable");
+      },
+      async sendLink(_chatId, _eventId, url) {
+        activity.push(`link:${url}`);
+        return { messageId: "out-link" };
+      },
+    },
+    store: new InMemoryProcessedEventStore(),
+  });
+
+  assert.equal(
+    (await processEvent(event({ eventId: "evt-app-card-fallback" }))).status,
+    "sent",
+  );
+  assert.deepEqual(activity, ["text", "app:failed", `link:${approvalUrl}`]);
+});
+
+test("removes em dashes from every outbound reply", async () => {
+  let sentText = "";
+  const processEvent = createMessageReplyProcessor({
+    fromNumber: tavraNumber,
+    generator: {
+      async generateReply() {
+        return "Got it — I can help.";
+      },
+    },
+    sender: {
+      async sendText(_chatId, _eventId, text) {
+        sentText = text;
+        return { messageId: "out-sanitized" };
+      },
+    },
+    store: new InMemoryProcessedEventStore(),
+  });
+
+  assert.equal((await processEvent(event({ eventId: "evt-em-dash" }))).status, "sent");
+  assert.equal(sentText, "Got it - I can help.");
+  assert.doesNotMatch(sentText, /—/);
+});
+
+test("sends a safe reply when generation fails without failing the webhook", async () => {
   const activity: string[] = [];
   const processEvent = createMessageReplyProcessor({
     fromNumber: tavraNumber,
@@ -606,15 +1026,20 @@ test("clears the typing indicator when reply generation fails", async () => {
       async stopTyping() {
         activity.push("typing:stop");
       },
-      async sendText() {
-        throw new Error("send should not be called");
+      async sendText(_chatId, _eventId, text) {
+        activity.push(`send:${text}`);
+        return { messageId: "out-safe" };
       },
     },
     store: new InMemoryProcessedEventStore(),
   });
 
-  await assert.rejects(() => processEvent(event()), /OpenAI unavailable/);
-  assert.deepEqual(activity, ["typing:start", "generate", "typing:stop"]);
+  assert.equal((await processEvent(event())).status, "sent");
+  assert.deepEqual(activity, [
+    "typing:start",
+    "generate",
+    "send:I hit a temporary issue while handling that message. Nothing was ordered or submitted. Please send it again.",
+  ]);
 });
 
 test("ignores empty messages and non-iMessage traffic", async () => {

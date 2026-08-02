@@ -1,14 +1,65 @@
+# Operating system and editor files
 .DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Secrets and machine-local configuration
 .env
-senso/demo-config/identity-map.local.json
-senso/demo-config/*.local.md
+.env.*
+!.env.example
+.npmrc
+.netrc
+.secrets/
+.credentials/
+*.cer
+*.crt
+*.pem
+*.key
+*.p8
+*.p12
+*.mobileprovision
+*.provisionprofile
+senso/demo-config/identity-map*.json
+!senso/demo-config/identity-map.example.json
+senso/demo-config/*.local.*
+
+# Dependencies, build output, and test artifacts
 node_modules/
 dist/
 web-dist/
-data/*.jsonl
+landing-dist/
+coverage/
+test-results/
+playwright-report/
+.vercel/
 *.log
+
+# Runtime state and databases
+data/*
+!data/.gitkeep
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.sqlite-journal
+*.db
+*.db-*
+
+# Local iOS/Xcode state and signing material
 ios/TavraMessages/Config/Local.xcconfig
 ios/TavraMessages/TavraMessages.xcodeproj/
 ios/TavraMessages/DerivedData/
 ios/TavraMessagesCore/.build/
 ios/TavraMessagesCore/.swiftpm/
+**/xcuserdata/
+*.xcuserstate
+
+# Generated artifacts and private working documents
+output/
+tmp/
+plan/
+.impeccable/
+DESIGN.md
+PRODUCT.md

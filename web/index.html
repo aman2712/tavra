@@ -3,106 +3,152 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="theme-color" content="#f8f7f3" />
-    <meta name="color-scheme" content="light" />
-    <title>Secure checkout | Tavra</title>
+    <meta name="theme-color" content="#090909" />
+    <meta name="description" content="Tavra gets you moving again when travel goes wrong." />
+    <title>Tavra | Travel recovery, handled</title>
   </head>
-  <body>
-    <div class="shell">
-      <header class="topbar" aria-label="Tavra secure checkout">
-        <a class="brand" href="/" aria-label="Tavra home">
-          <span class="brand-mark" aria-hidden="true">t</span>
+  <body class="landing-page">
+    <div class="landing-noise" aria-hidden="true"></div>
+    <header class="site-header">
+      <div class="landing-shell site-header-inner">
+        <a class="landing-brand" href="#top" aria-label="Tavra home">
+          <span class="landing-brand-mark" aria-hidden="true"><img src="../assets/brand/tavra-logo-master-v1.png" alt="" /></span>
           <span>Tavra</span>
         </a>
-        <div class="secure-label">
-          <svg viewBox="0 0 24 24" aria-hidden="true">
-            <path d="M7.5 10V7.5a4.5 4.5 0 0 1 9 0V10m-10 0h11a1.5 1.5 0 0 1 1.5 1.5v7A1.5 1.5 0 0 1 17.5 20h-11A1.5 1.5 0 0 1 5 18.5v-7A1.5 1.5 0 0 1 6.5 10Z" />
-          </svg>
-          Secure approval
+        <nav class="site-nav" id="site-nav" aria-label="Main navigation">
+          <a href="#how-it-works">How it works</a>
+          <a href="#trust">Trust</a>
+          <a href="#vision">Vision</a>
+          <a class="nav-cta" href="#how-it-works">See how it works <span aria-hidden="true">↓</span></a>
+        </nav>
+        <button class="nav-toggle" type="button" aria-expanded="false" aria-controls="site-nav" aria-label="Toggle navigation">
+          <span></span><span></span>
+        </button>
+      </div>
+    </header>
+
+    <main id="top">
+      <section class="hero landing-shell" aria-labelledby="hero-title">
+        <div class="hero-copy" data-reveal>
+          <div class="hero-kicker"><span class="live-dot"></span> Travel recovery, in Messages</div>
+          <h1 id="hero-title">Travel broke.<br /><em>We'll get you ready again.</em></h1>
+          <p class="hero-lede">Forward the disruption notice. Tavra finds what you need, verifies the fastest trustworthy option, gets your approval, and completes the purchase.</p>
+          <div class="hero-actions">
+            <a class="button button-light" href="#how-it-works">Watch demo <span aria-hidden="true">↗</span></a>
+            <a class="button button-quiet-dark" href="#trust">Why Tavra</a>
+          </div>
+          <p class="hero-note"><span aria-hidden="true">⌁</span> Built for the moment after the apology email.</p>
         </div>
-      </header>
 
-      <main class="checkout" id="checkout-root">
-        <section class="summary" aria-labelledby="summary-title">
-          <p class="eyebrow">Baggage recovery</p>
-          <h1 id="summary-title">One last secure step.</h1>
-          <p class="lede">
-            Review the recovery option Tavra prepared, then approve it through Prava.
-            Your card details stay inside Prava’s protected form.
-          </p>
-
-          <div class="order" aria-live="polite">
-            <div class="order-heading">
-              <h2>Recovery option</h2>
-              <span class="status-chip">Within allowance</span>
-            </div>
-            <div id="order-skeleton" class="order-skeleton" aria-label="Loading order">
-              <span></span><span></span><span></span>
-            </div>
-            <ul id="order-items" class="order-items" hidden></ul>
-            <div class="total-row">
-              <span>Total</span>
-              <strong id="order-total">$154.00</strong>
-            </div>
-          </div>
-
-          <div class="trust-note">
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M12 3 5.5 5.8v5.4c0 4.4 2.7 7.7 6.5 9.8 3.8-2.1 6.5-5.4 6.5-9.8V5.8L12 3Z" />
-              <path d="m9.3 12 1.8 1.8 3.8-4" />
-            </svg>
-            <p><strong>Tavra never sees your card number.</strong> First-time setup adds a passkey. Repeat approvals use your saved card and biometrics.</p>
-          </div>
-        </section>
-
-        <section class="payment" aria-labelledby="payment-title">
-          <div class="payment-heading">
-            <div>
-              <p class="step-label">Secure payment</p>
-              <h2 id="payment-title">Approve with Prava</h2>
-            </div>
-            <span id="session-timer" class="session-timer" aria-live="polite"></span>
-          </div>
-
-          <div id="loading-state" class="loading-state" aria-live="polite">
-            <div class="loading-line wide"></div>
-            <div class="loading-line"></div>
-            <div class="loading-block"></div>
-            <p>Preparing your protected session…</p>
-          </div>
-
-          <div id="error-state" class="state-message error-state" role="alert" hidden>
-            <span class="state-icon" aria-hidden="true">!</span>
-            <h3>We couldn’t open the secure session.</h3>
-            <p id="error-message">The link may have expired. Ask Tavra for a fresh one.</p>
-            <button id="retry-button" class="button primary" type="button">Try again</button>
-          </div>
-
-          <div id="success-state" class="state-message success-state" aria-live="polite" hidden>
-            <span class="state-icon" aria-hidden="true">
-              <svg viewBox="0 0 24 24"><path d="m6.5 12.5 3.4 3.4 7.6-8" /></svg>
-            </span>
-            <p class="eyebrow">Approval complete</p>
-            <h3>Secure approval complete.</h3>
-            <p>Tavra is updating your iMessage thread. No raw card details were shared, and no live merchant order or charge was created in this sandbox flow.</p>
-            <p class="return-hint">You can return to Messages now.</p>
-          </div>
-
-          <div id="card-stage" hidden>
-            <div id="prava-card-form" class="prava-frame" aria-label="Prava secure card form"></div>
-            <div class="payment-footer">
-              <p id="payment-status" role="status">Waiting for secure approval</p>
-              <button id="cancel-button" class="button quiet" type="button">Cancel</button>
+        <div class="hero-visual" data-reveal>
+          <div class="orbit-label orbit-label-top"><span>01</span> Forward the disruption</div>
+          <div class="phone-wrap" data-phone>
+            <div class="phone-shadow" aria-hidden="true"></div>
+            <div class="phone-shell">
+              <div class="phone-bezel">
+                <div class="phone-island" aria-hidden="true"></div>
+                <div class="phone-screen">
+                  <div class="imessage-status"><span>9:41</span><span>●●● ◒</span></div>
+                  <div class="imessage-header"><span class="back-arrow">‹</span><div class="avatar">t</div><div><strong>Tavra</strong><small>iMessage</small></div><span class="info-dot">i</span></div>
+                  <div class="message-thread">
+                    <p class="thread-date">TODAY  ·  9:42 AM</p>
+                    <div class="notice-card">
+                      <div class="notice-icon">↯</div><div><strong>Emirates</strong><span>Delayed baggage notice</span><small>EK 202 · Boston → Dubai</small></div>
+                    </div>
+                    <div class="bubble bubble-user">My bag didn’t make it. I need clothes and toiletries before my client meeting tomorrow.</div>
+                    <div class="bubble bubble-tavra">I’ve got it. I’ll find what can arrive tonight, within your travel allowance.</div>
+                    <div class="typing-row"><span class="tavra-avatar">t</span><span class="typing"><i></i><i></i><i></i></span></div>
+                    <div class="recovery-card">
+                      <div class="recovery-top"><span class="recovery-status"><i></i> Ready to review</span><span>9:45 AM</span></div>
+                      <strong>Recovery bundle</strong>
+                      <div class="recovery-items"><span>Everyday shirt</span><span>Toiletry kit</span><span>Overnight delivery</span></div>
+                      <div class="recovery-bottom"><b>$76.40</b><span>Approve securely <b>›</b></span></div>
+                    </div>
+                  </div>
+                  <div class="imessage-compose"><span>iMessage</span><b>↑</b></div>
+                </div>
+              </div>
             </div>
           </div>
-        </section>
-      </main>
+          <div class="orbit-label orbit-label-bottom"><span>02</span> Approve once. Keep moving.</div>
+        </div>
+      </section>
 
-      <footer>
-        <span>Sandbox checkout</span>
-        <span>Secured by Prava</span>
-      </footer>
-    </div>
-    <script type="module" src="/main.ts"></script>
+      <div class="ticker" aria-label="Tavra capabilities">
+        <div class="ticker-track"><span>DELAYED BAGGAGE</span><i></i><span>FORGOTTEN ESSENTIALS</span><i></i><span>WEATHER MISMATCH</span><i></i><span>URGENT TRAVEL RECOVERY</span><i></i><span>DELAYED BAGGAGE</span><i></i><span>FORGOTTEN ESSENTIALS</span><i></i><span>WEATHER MISMATCH</span><i></i><span>URGENT TRAVEL RECOVERY</span></div>
+      </div>
+
+      <section class="story-section landing-shell" data-reveal>
+        <div class="section-marker"><span>01</span><span>Why Tavra exists</span></div>
+        <div class="story-grid">
+          <h2>A disruption is<br /><span>never just</span> a disruption.</h2>
+          <div class="story-timeline">
+            <div class="story-line" aria-hidden="true"><i></i></div>
+            <ol>
+              <li><span>Flight lands.</span><small>18:20</small></li>
+              <li><span>Bag doesn't.</span><small>18:43</small></li>
+              <li><span>Meeting tomorrow.</span><small>08:00</small></li>
+              <li><span>Travel turns into shopping.</span><small>22 tabs open</small></li>
+              <li class="story-last"><span>Tavra finishes it.</span><small>back to ready</small></li>
+            </ol>
+          </div>
+        </div>
+        <p class="section-pull">The airline sends an apology. Tavra handles what comes after.</p>
+      </section>
+
+      <section class="workflow-section" id="how-it-works">
+        <div class="landing-shell">
+          <div class="section-marker" data-reveal><span>02</span><span>The recovery loop</span></div>
+          <div class="workflow-heading" data-reveal><h2>One forward.<br /><span>The rest, handled.</span></h2><p>One conversation connects the context, the deadline, the policy, and the purchase.</p></div>
+          <div class="workflow" data-workflow data-reveal>
+            <div class="workflow-track" aria-hidden="true"><span></span></div>
+            <ol>
+              <li data-workflow-node class="is-active"><b>01</b><span class="workflow-glyph">↗</span><strong>Forward<br />disruption</strong><small>Start with the notice.</small></li>
+              <li data-workflow-node><b>02</b><span class="workflow-glyph">⌁</span><strong>Understand<br />the moment</strong><small>Need, place, deadline.</small></li>
+              <li data-workflow-node><b>03</b><span class="workflow-glyph">⌕</span><strong>Find the<br />right option</strong><small>Trusted merchants only.</small></li>
+              <li data-workflow-node><b>04</b><span class="workflow-glyph">◉</span><strong>Approve<br />securely</strong><small>One-time, bounded.</small></li>
+              <li data-workflow-node><b>05</b><span class="workflow-glyph">✓</span><strong>Get back<br />to ready</strong><small>Receipt included.</small></li>
+            </ol>
+          </div>
+        </div>
+      </section>
+
+      <section class="trust-section landing-shell" id="trust">
+        <div class="section-marker" data-reveal><span>03</span><span>Trust is the product</span></div>
+        <div class="trust-heading" data-reveal><h2>Powerful enough to act.<br /><span>Careful enough to trust.</span></h2><p>Tavra does the work, but every consequential step stays visible and bounded.</p></div>
+        <div class="trust-layout">
+          <article class="trust-feature" data-tilt data-reveal><div class="trust-feature-top"><span class="feature-index">A / 01</span><span class="shield-mark">✦</span></div><h3>Never unrestricted.</h3><p>Tavra never holds an open-ended card or decides what to spend. Prava asks for approval for the exact merchant, items, destination, and total.</p><div class="trust-foot"><span>PAYMENT BOUNDARIES</span><b>●●●●●●●●</b></div></article>
+          <div class="trust-stack">
+            <article class="trust-row" data-tilt data-reveal><span class="trust-number">01</span><div><h3>Verified merchants</h3><p>Options come from merchants Tavra can identify and stand behind.</p></div><span class="trust-arrow">↗</span></article>
+            <article class="trust-row" data-tilt data-reveal><span class="trust-number">02</span><div><h3>Policy-aware decisions</h3><p>Allowance and reimbursement context shape the bundle before checkout.</p></div><span class="trust-arrow">↗</span></article>
+            <article class="trust-row" data-tilt data-reveal><span class="trust-number">03</span><div><h3>Recovery receipt</h3><p>Merchant, items, approval, order, and policy in one clean record.</p></div><span class="trust-arrow">↗</span></article>
+          </div>
+        </div>
+      </section>
+
+      <section class="receipt-section landing-shell" data-reveal>
+        <div class="receipt-copy"><div class="section-marker"><span>04</span><span>Proof, not promises</span></div><h2>Leave with a receipt<br /><span>for the whole recovery.</span></h2><p>Tavra closes the loop with an evidence-ready record, so a stressful night does not become a month of expense cleanup.</p><a href="#vision" class="text-link">See where this goes <span>↗</span></a></div>
+        <div class="receipt-stage"><div class="receipt-halo" aria-hidden="true"></div><article class="receipt-card" data-tilt><div class="receipt-card-top"><div class="receipt-brand"><span class="receipt-mark"><img src="../assets/brand/tavra-logo-master-v1.png" alt="" /></span><span>Tavra</span></div><span class="receipt-state"><i></i> Ready for reimbursement</span></div><div class="receipt-rule"></div><div class="receipt-title"><span>RECOVERY RECEIPT</span><strong>Case #TV-2048</strong></div><div class="receipt-merchant"><div class="merchant-logo">N</div><div><strong>Northline Market</strong><span>Verified checkout · Dubai, UAE</span></div><b>AED 280.50</b></div><ul><li><span>Everyday shirt <small>1 × M</small></span><b>AED 149.00</b></li><li><span>Travel essentials kit <small>1 × standard</small></span><b>AED 89.50</b></li><li><span>Same-day delivery <small>Arrived 23:18</small></span><b>AED 42.00</b></li></ul><div class="receipt-total"><span>Approved total</span><strong>AED 280.50</strong></div><div class="receipt-meta"><span><small>APPROVAL</small>One-time via Prava</span><span><small>POLICY</small>Within allowance</span><span><small>ORDER</small>NL-8841</span></div><div class="receipt-verified"><span>✓</span> Merchant order verified by Tavra</div></article></div>
+      </section>
+
+      <section class="people-section landing-shell" data-reveal>
+        <div class="section-marker"><span>05</span><span>For the people in motion</span></div>
+        <div class="people-intro"><h2>Built for people who<br /><span>can't afford to pause.</span></h2><p>For the work trip that still has a morning. For the event that still has a stage. For anyone who needs a way forward.</p></div>
+        <div class="people-list"><div><span>01</span><strong>Consultants</strong><small>Client-ready, wherever the case lands.</small></div><div><span>02</span><strong>Founders</strong><small>No time for a second job at baggage claim.</small></div><div><span>03</span><strong>Sales teams</strong><small>Keep the next meeting intact.</small></div><div><span>04</span><strong>Conference speakers</strong><small>The show can go on.</small></div><div><span>05</span><strong>Anyone travelling</strong><small>Because disruptions do not check your calendar.</small></div></div>
+      </section>
+
+      <section class="architecture-section" data-reveal>
+        <div class="landing-shell"><div class="section-marker"><span>06</span><span>Under the quiet surface</span></div><div class="architecture-heading"><h2>Simple to use.<br /><span>Serious underneath.</span></h2><p>One calm conversation on top of a system that knows when to search, ask, authorize, and stop.</p></div><div class="architecture"><div class="architecture-row"><span>iMessage</span><i>→</i><span>OpenAI</span><i>→</i><span>Senso</span><i>→</i><span>Prava</span><i>→</i><span>Merchant</span></div><div class="architecture-row architecture-row-bottom"><span>Recovery Receipt</span><i>←</i><span>Verified Merchant Memory</span></div></div></div>
+      </section>
+
+      <section class="vision-section landing-shell" id="vision" data-reveal>
+        <div class="section-marker"><span>07</span><span>Where we're going</span></div><div class="vision-heading"><h2>Today we recover trips.<br /><span>Tomorrow we keep them running.</span></h2><p>Recovery is the first proof point. Continuity is the bigger idea.</p></div><div class="roadmap"><div class="roadmap-line" aria-hidden="true"></div><article class="roadmap-step is-now"><span class="roadmap-state">NOW</span><div class="roadmap-dot"></div><h3>Recover</h3><p>Get the right thing, to the right place, before the next obligation.</p></article><article class="roadmap-step"><span class="roadmap-state">NEXT</span><div class="roadmap-dot"></div><h3>Reconcile</h3><p>Turn every recovery into a clean, policy-aware record.</p></article><article class="roadmap-step"><span class="roadmap-state">LATER</span><div class="roadmap-dot"></div><h3>Prevent</h3><p>Learn the patterns that keep the next trip intact.</p></article></div>
+      </section>
+
+      <section class="final-section landing-shell" data-reveal><div class="final-rule"></div><div class="final-inner"><span class="final-kicker">WHEN THE UNEXPECTED HAPPENS</span><h2>Travel doesn't stop<br /><em>when your luggage does.</em></h2><p>See how Tavra helps travelers recover their way forward.</p><div class="final-actions"><a class="button button-light" href="#how-it-works">See how it works <span aria-hidden="true">↑</span></a><a class="button button-quiet-dark" href="#trust">Why Tavra</a></div></div></section>
+    </main>
+
+    <footer class="landing-footer"><div class="landing-shell landing-footer-inner"><a class="landing-brand" href="#top"><span class="landing-brand-mark" aria-hidden="true"><img src="../assets/brand/tavra-logo-master-v1.png" alt="" /></span><span>Tavra</span></a><span>Urgent travel recovery, handled.</span><span>© 2026 Tavra</span></div></footer>
+    <script type="module" src="/landing.ts"></script>
   </body>
 </html>

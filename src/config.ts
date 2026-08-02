@@ -25,14 +25,21 @@ export interface SensoConfig {
 }
 
 export type PravaMode = "sandbox" | "live";
+export type CommerceRuntimeMode = "disabled" | "live" | "sandbox";
 
 export interface PravaConfig {
-  pravaPublishableKey: string;
-  pravaSecretKey: string;
+  pravaPublishableKey: string | null;
+  pravaSecretKey: string | null;
   pravaMode: PravaMode;
-  pravaBackendUrl: string;
+  pravaBackendUrl: string | null;
   pravaCheckoutMode: "embedded" | "hosted";
   publicBaseUrl: string;
+}
+
+export interface RequiredPravaConfig extends PravaConfig {
+  pravaPublishableKey: string;
+  pravaSecretKey: string;
+  pravaBackendUrl: string;
 }
 
 export interface IMessageAppConfig {
@@ -40,15 +47,43 @@ export interface IMessageAppConfig {
   iMessageAppIdentity: IMessageAppIdentity | null;
 }
 
+export interface CommerceRuntimeConfig {
+  /** Sandbox must be selected explicitly. There is no automatic fallback. */
+  commerceMode?: CommerceRuntimeMode;
+  pravaMcpUrl?: string;
+}
+
 export interface ServerConfig
   extends LinqApiConfig,
     OpenAIConfig,
     SensoConfig,
     PravaConfig,
-    IMessageAppConfig {
+    IMessageAppConfig,
+    CommerceRuntimeConfig {
   mode: LinqMode;
   port: number;
   webhookSecret: string | null;
+}
+
+export function loadCommerceRuntimeConfig(): CommerceRuntimeConfig {
+  const commerceMode = process.env.TAVRA_COMMERCE_MODE?.trim() || "disabled";
+  if (
+    commerceMode !== "disabled" &&
+    commerceMode !== "live" &&
+    commerceMode !== "sandbox"
+  ) {
+    throw new Error("TAVRA_COMMERCE_MODE must be disabled, live, or sandbox");
+  }
+  const endpoint = new URL(
+    process.env.PRAVA_MCP_URL?.trim() || "https://mcp.pay.prava.space/mcp",
+  );
+  if (endpoint.protocol !== "https:" || endpoint.username || endpoint.password) {
+    throw new Error("PRAVA_MCP_URL must be a credential-free HTTPS URL");
+  }
+  return {
+    commerceMode,
+    pravaMcpUrl: endpoint.toString(),
+  };
 }
 
 function required(name: string): string {
@@ -98,7 +133,7 @@ export function loadSensoConfig(): SensoConfig {
   };
 }
 
-export function loadPravaConfig(): PravaConfig {
+export function loadPravaConfig(): RequiredPravaConfig {
   const mode = process.env.PRAVA_MODE?.trim() || "sandbox";
   if (mode !== "sandbox" && mode !== "live") {
     throw new Error("PRAVA_MODE must be sandbox or live");
@@ -151,8 +186,18 @@ export function loadServerConfig(): ServerConfig {
   const api = loadLinqApiConfig();
   const openAI = loadOpenAIConfig();
   const senso = loadSensoConfig();
-  const prava = loadPravaConfig();
   const iMessageApp = loadIMessageAppConfig();
+  const commerce = loadCommerceRuntimeConfig();
+  const prava: PravaConfig = commerce.commerceMode === "sandbox"
+    ? loadPravaConfig()
+    : {
+        pravaPublishableKey: null,
+        pravaSecretKey: null,
+        pravaMode: "live",
+        pravaBackendUrl: null,
+        pravaCheckoutMode: "hosted",
+        publicBaseUrl: loadPublicBaseUrl().toString().replace(/\/$/, ""),
+      };
   const modeValue = process.env.LINQ_MODE?.trim() || "live";
   if (modeValue !== "live" && modeValue !== "mock") {
     throw new Error("LINQ_MODE must be either live or mock");
@@ -174,6 +219,7 @@ export function loadServerConfig(): ServerConfig {
     ...senso,
     ...prava,
     ...iMessageApp,
+    ...commerce,
     mode: modeValue,
     port,
     webhookSecret,

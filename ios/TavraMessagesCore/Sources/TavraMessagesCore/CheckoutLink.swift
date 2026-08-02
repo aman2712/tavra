@@ -121,9 +121,9 @@ public struct CheckoutLink: Equatable, Sendable {
             normalizedPort == ownPort
     }
 
-    /// Product thumbnails are limited to Tavra's versioned public checkout asset
-    /// path on the exact checkout origin. Remote merchant URLs are intentionally
-    /// not accepted by the native extension.
+    /// Product images stay on the exact Tavra checkout origin. Live merchant
+    /// images use a checkout-scoped, byte-preserving proxy so the extension never
+    /// contacts an arbitrary host supplied in a message payload.
     public func allowsProductImage(_ url: URL) -> Bool {
         guard hasSameOrigin(as: url),
               let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
@@ -133,9 +133,16 @@ public struct CheckoutLink: Equatable, Sendable {
               components.fragment == nil else {
             return false
         }
-        return components.percentEncodedPath.range(
+        let path = components.percentEncodedPath
+        if path.range(
             of: #"^/checkout-assets/products/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\.(?:png|jpe?g|webp|heic|heif)$"#,
             options: [.regularExpression, .caseInsensitive]
+        ) != nil {
+            return true
+        }
+        return path.range(
+            of: #"^/api/prava/checkouts/\#(NSRegularExpression.escapedPattern(for: checkoutID))/products/[0-9]{1,2}/image$"#,
+            options: .regularExpression
         ) != nil
     }
 

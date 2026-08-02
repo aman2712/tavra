@@ -9,6 +9,7 @@ const client = createLinqClient(config);
 const target = new URL("/webhooks/linq?version=2026-02-03", loadPublicBaseUrl());
 const subscribedEvents = [
   "message.received",
+  "reaction.added",
   "location.sharing.started",
   "location.sharing.stopped",
 ] as const;

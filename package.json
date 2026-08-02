@@ -8,6 +8,7 @@
     "predev": "npm run build:web",
     "dev": "tsx watch src/server.ts",
     "build:web": "vite build",
+    "build:landing": "vite build --config vite.landing.config.ts",
     "prepreview:payment": "npm run build:web",
     "preview:payment": "vite preview --host 127.0.0.1 --port 4173 --strictPort --open \"/checkout-assets/?preview=1\"",
     "build": "npm run build:web && tsc -p tsconfig.json",
@@ -23,6 +24,7 @@
     "smoke:openai": "tsx scripts/smoke-openai.ts",
     "smoke:senso-openai": "tsx scripts/smoke-senso-openai.ts",
     "smoke:prava": "tsx scripts/smoke-prava.ts",
+    "prava:link-commerce": "tsx scripts/prava-link-commerce.ts",
     "senso:sync-profile": "tsx scripts/senso-sync-private-profile.ts",
     "ios:messages:generate": "bash ios/TavraMessages/generate-project.sh",
     "test:ios": "swift test --package-path ios/TavraMessagesCore",
@@ -37,7 +39,9 @@
     "@prava-sdk/core": "^0.1.2",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
-    "openai": "^7.3.0"
+    "openai": "^7.3.0",
+    "playwright": "^1.62.1",
+    "undici": "^7.29.0"
   },
   "devDependencies": {
     "@types/express": "^5.0.6",

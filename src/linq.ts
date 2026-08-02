@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import LinqAPIV3 from "@linqapp/sdk";
 import {
   sameLinqHandle,
@@ -17,7 +19,21 @@ export function createLinqClient(options: {
   });
 }
 
-export function createLinqMessageSender(client: LinqAPIV3): LinqMessageSender {
+export function createLinqMessageSender(
+  client: LinqAPIV3,
+  options: {
+    fetch?: typeof fetch;
+    /**
+     * Linq recommends a public HTTPS media URL for a file that is sent once.
+     * When configured, this avoids the optional pre-upload endpoint entirely.
+     */
+    documentUrl?: (input: {
+      eventId: string;
+      filename: string;
+    }) => string;
+  } = {},
+): LinqMessageSender {
+  const fetchImpl = options.fetch ?? fetch;
   return {
     async startTyping(chatId) {
       await client.chats.typing.start(chatId);
@@ -47,6 +63,63 @@ export function createLinqMessageSender(client: LinqAPIV3): LinqMessageSender {
         },
       });
       return { messageId: result.message.id };
+    },
+    async sendDocument(chatId, eventId, document) {
+      if (options.documentUrl) {
+        const url = new URL(
+          options.documentUrl({ eventId, filename: document.filename }),
+        );
+        if (url.protocol !== "https:") {
+          throw new Error("Linq document media URL must use HTTPS");
+        }
+        const result = await client.chats.messages.send(chatId, {
+          message: {
+            parts: [{ type: "media", url: url.toString() }],
+            preferred_service: "iMessage",
+            idempotency_key: `tavra-document-${eventId}`,
+          },
+        });
+        const deliveryReference = createHash("sha256")
+          .update(eventId)
+          .update("\0")
+          .update(document.bytes)
+          .digest("hex");
+        return {
+          messageId: result.message.id,
+          attachmentId: `url-${deliveryReference}`,
+        };
+      }
+      const attachment = await client.attachments.create({
+        filename: document.filename,
+        content_type: document.contentType,
+        size_bytes: document.bytes.byteLength,
+      });
+      const upload = await fetchImpl(attachment.upload_url, {
+        method: attachment.http_method,
+        headers: attachment.required_headers,
+        body: document.bytes as BodyInit,
+      });
+      if (!upload.ok) {
+        throw new Error(
+          `Linq attachment upload failed with HTTP ${upload.status}`,
+        );
+      }
+      const result = await client.chats.messages.send(chatId, {
+        message: {
+          parts: [
+            {
+              type: "media",
+              attachment_id: attachment.attachment_id,
+            },
+          ],
+          preferred_service: "iMessage",
+          idempotency_key: `tavra-document-${eventId}`,
+        },
+      });
+      return {
+        messageId: result.message.id,
+        attachmentId: attachment.attachment_id,
+      };
     },
     async sendLink(chatId, eventId, url) {
       const result = await client.chats.messages.send(chatId, {

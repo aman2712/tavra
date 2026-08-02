@@ -32,20 +32,24 @@ When a person taps an installed Tavra app card, `MessagesViewController`:
 4. Fetches the same-origin redacted summary from
    `/api/prava/checkouts/{id}/summary` using an ephemeral, no-cookie, no-cache
    URL session.
-5. Displays the itemized checkout, total, and optional product thumbnails as
-   native UIKit. Thumbnail URLs must use the same exact Tavra origin and the
-   `/checkout-assets/products/{safe-filename}` path; redirects and arbitrary
-   merchant image hosts are rejected.
-6. Presents the existing HTTPS Tavra/Prava approval page in a modal
-   `SFSafariViewController`, so the user remains in the Messages experience
-   while the payment ceremony stays in a Safari-controlled surface.
-7. Polls the sanitized same-origin status endpoint while the extension is
-   active and distinguishes pending, simulated, live, failed, and
-   reconciliation-required outcomes.
+5. Displays the merchant, exact variant, masked destination, delivery status,
+   allowance, quote expiry, itemized pricing, and optional product thumbnail as
+   native UIKit. A live thumbnail must use the same exact Tavra origin and
+   `/api/prava/checkouts/{id}/products/{index}/image`. Explicit sandbox mode may
+   use `/checkout-assets/products/{safe-filename}`. Redirects and arbitrary
+   merchant hosts are rejected by the extension.
+6. Presents the HTTPS Tavra approval URL in a modal `SFSafariViewController`.
+   Live mode redirects that short URL to the exact Prava approval target stored
+   with the checkout. The payment ceremony stays in a Safari-controlled surface.
+7. Continues polling the sanitized same-origin status endpoint while the secure
+   modal is open, dismisses it after a terminal result, and distinguishes
+   pending approval, merchant checkout, live order, sandbox completion, failure,
+   cancellation, and reconciliation-required outcomes.
 
 The summary endpoint intentionally excludes the Prava publishable key, Prava
-session token, iframe URL, secret key, network token, dynamic CVV, address, phone
-number, and baggage evidence. The opaque checkout ID is still a bearer
+session token, remote approval URL, iframe URL, secret key, network token,
+dynamic CVV, complete address, phone number, and baggage evidence. It may include
+a masked destination label and sanitized live merchant details. The opaque checkout ID is still a bearer
 capability: do not log it, add it to analytics, or place it in screenshots.
 
 ## Why Tavra does not put Prava in a `WKWebView`
@@ -221,26 +225,43 @@ excluding browser session state and payment credentials.
 
 ## Physical-device acceptance test
 
-1. Start Tavra and its public HTTPS tunnel with `npm run dev:imessage`.
-2. Confirm the hostname exactly matches `TAVRA_CHECKOUT_HOST` in the installed
+1. Complete `npm run prava:link-commerce`, select the intended masked Prava
+   address, set `TAVRA_COMMERCE_MODE=live`, and verify `/health/commerce` is ready.
+2. Start Tavra and its public HTTPS tunnel with `npm run dev:imessage`.
+3. Confirm the hostname exactly matches `TAVRA_CHECKOUT_HOST` in the installed
    extension build.
-3. Install the signed Messages app on the test iPhone.
-4. Ensure the server `.env` has the same team and extension bundle IDs, restart
-   `npm run dev:imessage`, and complete a recovery flow so Tavra sends the Linq
-   `imessage_app` checkout card.
-5. Confirm the static bubble shows the Tavra summary and tapping it opens the
-   native extension rather than plain fallback text.
-6. Confirm the extension shows only items, quantities, same-origin product
-   thumbnails, total, and sanitized state. Inspect device logs and verify no
-   session token, card value, CVV, or Prava secret appears.
-7. Tap **Continue securely with Prava**. Confirm the hosted page appears within
-   the Safari-controlled modal and the extension cannot inspect or alter it.
-8. Complete the Prava sandbox approval with Face ID or the sandbox ceremony.
-9. Return to the extension and confirm it shows **Sandbox approval complete**
-   plus the explicit statement that there is no live merchant order.
-10. Confirm Tavra also posts the truthful result in the original chat.
-11. Repeat with an expired card, wrong host, lookalike subdomain, altered ID,
-    revoked checkout, Prava failure, and reconciliation-required result.
+4. Install the signed Messages app on the test iPhone.
+5. Ensure the server `.env` has the same team and extension bundle IDs, restart
+   `npm run dev:imessage`, and complete a recovery flow through confirmed size,
+   exact destination, live offer, and address-bound quote.
+6. Confirm the bubble uses the selected UCP image and shows the live merchant,
+   exact variant, total, and review state. Tapping it must open native Tavra,
+   not plain fallback text.
+7. Confirm the native review shows the masked destination, verified or
+   unverified delivery status, quote expiry, subtotal, shipping, tax, total,
+   allowance when comparable, and **Not purchased yet**.
+8. Inspect device and server logs. Verify no full address, payment session token,
+   card value, CVV, OAuth token, or Prava secret appears.
+9. Approve the unchanged quote in chat, then tap **Continue securely with
+   Prava**. Confirm the approval appears in the Safari-controlled modal and the
+   extension cannot inspect or alter it.
+10. Complete the Prava and card-network ceremony. Confirm the modal dismisses
+    after the terminal status without requiring another chat message.
+11. If Browser Harness returns an order, confirm the same card and chat show the
+    exact merchant order ID. If the outcome is unknown, confirm Tavra shows
+    reconciliation required and does not retry or claim an order.
+12. Confirm the recovery case stores the merchant order as expense evidence and
+    does not mark a receipt, dispatch, delivery, airline submission, or employer
+    reimbursement complete without separate evidence.
+13. Repeat with an expired quote, wrong host, lookalike subdomain, altered ID,
+    revoked checkout, missing scope, unavailable product, payment failure, and
+    reconciliation-required result.
+
+For the Prava production-access rehearsal, set `TAVRA_COMMERCE_MODE=sandbox`
+explicitly. Complete product discovery, purchase-specific approval, one-time
+card retrieval, and the single end-merchant checkout attempt. The resulting
+card and chat must show the expected test-card or insufficient-funds decline
+and must not claim an order, receipt, dispatch, delivery, or incurred expense.
 
 Do not record real phone numbers, checkout IDs, email addresses, addresses,
 card details, baggage references, or passkey screens in the hackathon video.
@@ -260,9 +281,9 @@ card details, baggage references, or passkey screens in the hackathon video.
 - Updating a delivered Linq card requires retaining its delivered message ID
   and calling Linq's app-card update endpoint. A 409 before delivery must be
   retried after `message.delivered`.
-- Tavra currently retains the checkout-to-card message ID in process memory.
-  Production deployment still needs a durable mapping and delivery-aware retry
-  queue so a restart or early 409 cannot lose a card update.
+- Tavra stores the checkout-to-card message ID and terminal-notification outbox
+  in SQLite. A production multi-node deployment still needs a shared database,
+  distributed chat locking, and delivery-aware handling for an early Linq 409.
 - The user must perform a recent, explicit interaction for sensitive UI. Do not
   attempt to auto-launch payment or auto-trigger passkey approval when a message
   merely arrives.

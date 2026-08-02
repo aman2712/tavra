@@ -4,9 +4,9 @@ Audit date: 2026-08-02. This document distinguishes the current repository from 
 
 ## Executive assessment
 
-Tavra has a credible vertical slice: a known employee can message an iMessage number, receive a company-context-aware response, confirm a recovery option, and complete a protected Prava sandbox approval. The strongest foundations are identity scoping, payment credential isolation, webhook verification, and explicit pre-purchase language.
+Tavra has a credible vertical slice: a known employee can message an iMessage number, receive a company-context-aware response, confirm a destination and recovery need, review a live Prava UCP offer and quote, and complete protected Prava approval. The strongest foundations are identity scoping, payment credential isolation, webhook verification, explicit pre-purchase authorization, and deterministic merchant checkout state.
 
-The flow is now a truthful recovery prototype rather than the earlier fixed bundle script. It asks what the traveler wants, where and when it is needed, confirms saved sizes, rejects a late option, confirms an exact address, reads baggage notices, and persists incident, payment, evidence, expense, and airline claim-packet state. It still uses synthetic merchant evidence and a simulated downstream merchant result. No live order, dispatch, airline claim submission, or employer reimbursement is created.
+The flow is now a truthful recovery prototype rather than the earlier fixed bundle script. It asks what the traveler wants, where and when it is needed, confirms saved sizes and an exact address, reads baggage notices, discovers a live merchant product, validates an address-bound quote, and persists incident, payment, checkout, evidence, expense, and airline claim-packet state. The repository implements live checkout, but a linked Prava account, Abu Dhabi quote, physical-iPhone run, and real merchant order still require external proof. No dispatch, airline claim submission, or employer reimbursement is claimed without independent evidence.
 
 The production product should be organized around a durable **recovery case and evidence ledger**, not around a linear prompt stage. The model may interpret and plan, but every consequential action must be gated by verified facts, user authorization, policy, and an idempotent tool result.
 
@@ -18,12 +18,12 @@ The production product should be organized around a durable **recovery case and 
 | Identity | A private exact E.164 mapping resolves a sender to an allowlisted employee and Senso content IDs. | That Senso identifies a person from an arbitrary phone number or that semantic retrieval is an identity system. |
 | Senso | Tavra queries real Senso APIs using strict content-ID scope. Employee/profile/policy facts and synthetic demo merchant documents can be returned. | That the synthetic merchant catalog proves live stock, price, delivery, returns, or merchant trust. |
 | OpenAI | OpenAI routes intent, extracts structured turns, reads supported baggage-notice images, and writes constrained replies. Deterministic checks block unsupported meetings, early options, infeasible deadlines, and action claims. | That the model accessed live travel or merchant systems, verified facts not present in tools, or independently completed an action. |
-| Conversation | Recent turns and recovery stages are held in process memory. | Durable case memory, restart recovery, cross-device consistency, or a complete audit history. |
-| Prava | Tavra creates a Prava sandbox session, keeps payment credentials server-side, polls through session expiry, calls a mode-bound merchant adapter, validates Prava's acknowledgement, and reports the exact result. | That a sandbox approval alone charged a production card, placed a live merchant order, or established delivery. |
-| Merchant result | The configured adapter emits explicit `SIM-*` references and `simulated: true`. Live mode refuses to start without a live adapter, ambiguous completion becomes `reconciliation_required`, and cancel races are fail-closed. | That the simulated value came from a merchant. It is test evidence only. |
+| Conversation | Per-chat revisions, recovery stages, event/message/attachment deduplication, card mappings, and the terminal outbox are stored in permission-restricted SQLite. Late work is suppressed when a newer turn advances the case. | Multi-node consistency, indefinite personal memory, or a complete enterprise audit export. |
+| Prava | Live mode uses OAuth-linked Prava MCP for UCP search, exact product detail, address-bound quote, payment session, status polling, and Browser Harness checkout. Sandbox mode remains separate and labeled. | That repository support proves account scopes, UAE coverage, card acceptance, or a live order. Payment approval alone is not an order. |
+| Merchant result | Tavra calls `shop_checkout` once after the user approves the address-bound estimate, accepts an order only with a merchant order ID and matching approved amount, and uses `reconciliation_required` for unknown outcomes. Sandbox retains explicit simulation evidence. | That a live order exists until Browser Harness returns the merchant order ID, or that order means dispatched or delivered. |
 | Recovery and reimbursement | A local permission-restricted JSONL ledger stores the case, confirmed address, incident facts, verified evidence, actual expenses, payment outcome, fulfillment disclosure, blockers, a hashed claim packet, explicit manual-handoff authorization, and externally confirmed submission references. Reviewed official handoffs exist for Delta, American, and Emirates. | That Tavra itself submitted an airline form, that an airline accepted the packet without independent confirmation, or that an employer expense was submitted, reviewed, approved, or paid. |
 
-Repository anchors: `src/message-reply.ts` and `src/linq.ts` for text/media/location presentation; `src/product-media.ts` for selection-driven SKU/media resolution; `src/openai.ts` for evidence-bound dialogue and vision; `src/prava.ts` for the payment state machine; `src/recovery-case.ts` for case snapshots; `src/senso.ts` for scoped retrieval; and `senso/demo-corpus/README.md` for the synthetic-data boundary.
+Repository anchors: `src/message-reply.ts` and `src/linq.ts` for text/media/location presentation; `src/openai.ts` for evidence-bound dialogue and vision; `src/commerce.ts`, `src/prava-commerce.ts`, `src/prava-mcp.ts`, and `src/live-commerce.ts` for live commerce; `src/checkout-state-store.ts`, `src/recovery-state-store.ts`, and `src/event-store.ts` for durable coordination; `src/recovery-case.ts` for case snapshots; `src/senso.ts` for scoped retrieval; and `senso/demo-corpus/README.md` for the synthetic-data boundary.
 
 ## Why the old conversation felt hardcoded, and what changed
 
@@ -36,7 +36,7 @@ The earlier behavior was not only a prompting issue. Its state model dictated th
 - Product sourcing waits for goal, area, deadline, and size confirmation; an estimate later than the required deadline is rejected.
 - Airline, airport, reference, address, products, and payment outcome are written to a recovery case rather than discarded.
 
-The remaining rigidity is the demo catalog itself: one Boston essentials configuration and a fixed item mapping. A production planner still needs category-level needs, pickup, substitutions, multiple merchants, interruptions, durable conversation state, and verified live tools.
+Live mode no longer depends on the Boston catalog. Its deterministic selector uses UCP and currently purchases one essential, with T-shirt, toiletries, and trousers as a fixed priority. A production planner still needs pickup, substitutions, multi-item and multi-merchant baskets, cancellations and refunds, richer interruptions, and externally verified fulfillment events.
 
 The fix is a case model with slot confidence and action prerequisites. Prompts should decide phrasing and interpret evidence, while application logic decides what may happen next.
 
@@ -86,11 +86,11 @@ Sensitive values should be tokenized or encrypted, access-controlled per employe
 1. **Conversation triage: implemented for the delayed-baggage slice.** The invented meeting fallback is gone, missing values remain unknown, and deterministic prerequisites govern sourcing and checkout. Broad interruption and category support remain partial.
 2. **Need, urgency, and delivery: implemented for delivery.** Deadline and area precede sourcing; exact typed/shared-location address requires confirmation. Pickup and merchant address validation remain missing.
 3. **Inbound image handling: implemented for trusted Linq-hosted PNG, JPEG, WebP, and still GIF files up to 15 MB.** Extraction is schema-bound and user-confirmed. Durable original-file hashing, malware isolation, and field confidence remain missing.
-4. **Product media: implemented for the synthetic catalog as exact SKU-to-asset resolution.** Each proposed line item resolves to its own URL, caption, alt-text metadata, and source disclosure; incomplete coverage suppresses the whole gallery instead of substituting a bundle image. The three current files are illustrative demo assets, not official merchant SKU evidence.
-5. **Create durable orchestration.** Recovery cases, claim evidence, claim state, and processed event IDs are persisted in JSONL. Conversation sessions, active Prava checkouts, the checkout-to-app-card mapping, and notification outbox still disappear on restart and need a transactional store.
-6. **Merchant truth boundary: implemented for simulation, not fulfillment.** UI, chat, logs, case data, and demo copy distinguish the simulator from a live merchant. A real merchant remains the largest hackathon gap.
+4. **Product media: implemented for live UCP and explicit sandbox.** Live mode binds the exact selected UCP image to a checkout-scoped same-origin proxy and suppresses invalid media. Sandbox uses local illustrative SKU assets and never substitutes them into live mode.
+5. **Durable orchestration: implemented for the single-node demo.** SQLite stores conversation state, event revisions, active commerce workflows, checkout-to-card mappings, and the terminal outbox. The recovery evidence ledger remains separate. Multi-node coordination still needs a shared transactional database.
+6. **Merchant truth boundary: implemented in code, externally unverified.** Live, sandbox, and disabled runtime modes are explicit. A real Browser Harness order ID remains the largest evidence gap.
 7. **Incident reuse: partial.** Details now feed airline-specific reviewed destinations, required-field/evidence blockers, incurred expenses, a hashed claim packet, explicit handoff authorization, and externally confirmed submission state. Tavra does not submit authenticated airline forms, auto-ingest the returned confirmation yet, or connect an employer expense system.
-8. **Post-payment state: partial.** Payment, merchant, reconciliation, cancellation, and chat outcomes are separate and notification retries preserve one event. Checkout persistence and a durable outbox remain missing.
+8. **Post-payment state: implemented through merchant order or reconciliation.** Payment approval, checkout pending, ordered, failed, canceled, and reconciliation states are distinct and durable. Dispatch, delivery, cancellation with the merchant, and refund remain missing.
 9. **Evidence-backed tests: partial.** Automated tests cover the main gates and payment edge cases. A real-device image/location/Prava run, restart test, and external claim proof still need recording.
 
 ### P1: Required for production-quality behavior
@@ -176,7 +176,12 @@ Possibly, but it is a partner-capability and compliance question, not a prompt c
 - Prava's protected card/passkey ceremony must remain inside a Prava-approved secure surface. Tavra must never collect card number, CVV, dynamic credential, or passkey response in chat.
 - Prava's official [intent invocation guide](https://docs.prava.space/sdk/intents/invoke) describes a lower-friction repeat path: a previously passkey-authorized, merchant/amount/time-bounded intent can issue a one-time credential without another prompt. The installed `@prava-sdk/core` 0.1.2 package exposes card collection but not those intent methods, and Tavra has not implemented or sandbox-verified that newer flow.
 
-The lowest-risk current experience is one rich-link card, with employee identity and order context prefilled, followed by a default saved-card/passkey approval and a same-thread result. The next credible reduction in clicks is a Prava intent/mandate for repeat purchases, not card data in chat. A native Messages card is worth pursuing only after building and distributing the signed extension and confirming Prava's secure-surface behavior. Until that is proven, do not promise “pay in the bubble.”
+The current experience is one native Messages review card followed by Prava in
+`SFSafariViewController` and a same-card and same-thread result. The extension
+continues polling while the trusted payment surface is open. The next credible
+reduction in clicks is a Prava intent or mandate for repeat purchases, not card
+data in chat. Until Prava certifies a different native security context, do not
+promise “pay in the bubble.”
 
 ## Reimbursement architecture
 

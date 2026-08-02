@@ -1,10 +1,12 @@
 # Tavra
 
 Tavra is a message-native travel recovery service. This vertical slice is
-deliberately small: when the configured Linq number receives text or a supported
-image over iMessage, Tavra resolves the sender through a private exact mapping, retrieves
-that employee's allowlisted company context from Senso, and uses OpenAI to
-produce one concise, sensible reply in the same chat.
+deliberately focused: when the configured Linq number receives text or a supported
+image over iMessage, Tavra resolves the sender through a private exact mapping,
+retrieves that employee's allowlisted company context from Senso, and uses
+OpenAI for interpretation and natural language. Deterministic services own the
+recovery state, live product selection, quote validation, approval, checkout,
+and evidence record.
 
 ## What is implemented
 
@@ -20,8 +22,10 @@ produce one concise, sensible reply in the same chat.
   content IDs selected for the current intent; out-of-scope results fail closed.
 - OpenAI Responses API generation grounded in the retrieved context, with no
   model tools or web access.
-- Short in-process conversation history per Linq chat so terse follow-ups can be
-  interpreted in the preceding recovery context without becoming durable memory.
+- Durable per-chat conversation revisions and recovery state in a
+  permission-restricted SQLite database. Duplicate Linq events are ignored,
+  chat work is serialized, and late asynchronous replies are dropped if a newer
+  turn has advanced the case.
 - An evidence-bound delayed-baggage flow that first asks what help is wanted,
   where it is needed, and by when. Saved sizes are shown only after replacement
   essentials are requested, and product sourcing waits for explicit confirmation.
@@ -31,26 +35,33 @@ produce one concise, sensible reply in the same chat.
 - Multimodal baggage-notice intake for trusted Linq-hosted PNG, JPEG, WebP, and
   still-GIF files up to 15 MB. OpenAI extracts visible incident facts into a
   strict schema, and Tavra asks the employee to confirm them before use.
-- Selection-driven product media sent as native iMessage content when the
-  synthetic option is presented. Every proposed checkout line carries a stable
-  catalog reference and resolves to its own image, exact line-item caption,
-  alt-text metadata, source label, and illustrative-sandbox disclosure. If any
-  selected item is unmapped or its asset is absent, Tavra sends no partial or
-  substitute gallery.
-- Explicit item, total, address, incident, and email authorization in iMessage.
-  With a signed Tavra Messages extension configured, Linq sends a mutable
-  `imessage_app` checkout card; otherwise it fails back to the existing rich-link
-  Prava card rather than exposing a raw URL in the text.
-- A responsive, Apple Wallet-like secure approval page that mounts Prava's
-  protected iframe immediately, supports first-use passkey enrollment and repeat
-  biometric approval, and reports completion back into the same chat.
-- Server-only polling for Prava's one-time payment credential. Network tokens,
-  dynamic CVVs, secret keys, and raw card details are never returned to the
-  browser, chat, case ledger, or logs.
-- A mode-bound merchant checkout adapter. Sandbox emits explicit `SIM-*`
-  evidence; `PRAVA_MODE=live` refuses to start without a real live adapter.
-  Ambiguous completions, multiple credentials, invalid report acknowledgements,
-  and cancel races fail closed or enter reconciliation instead of claiming an order.
+- A Prava MCP commerce provider for UCP discovery, exact variant inspection,
+  address-bound quotes, Prava payment sessions, status polling, and Browser
+  Harness checkout. The deterministic selector searches a confirmed T-shirt
+  size first, toiletries second, and trousers only when both measurements exist.
+- Exact live merchant image, variant, masked destination, delivery information,
+  quote expiry, subtotal, shipping, tax, and total in one mutable Linq
+  `imessage_app` card. Merchant images are fetched through a checkout-scoped
+  same-origin proxy and are suppressed if they fail the HTTPS and content checks.
+- Separate explicit confirmations for the selected live offer and its exact
+  address-bound quote. The all-in cap is AED 250 or USD 68. A missing or
+  unverified delivery estimate is shown honestly and never converted into a
+  promised deadline.
+- A native Apple Wallet-like review in the signed Tavra Messages extension.
+  Prava and Visa verification remain in `SFSafariViewController`, which preserves
+  their trusted origin instead of exposing protected payment UI to Tavra.
+- Server-only payment polling followed by exactly one `shop_checkout` call after
+  Prava approval. Payment approval alone is not treated as an order. Unknown
+  checkout outcomes enter `reconciliation_required` and block blind retries.
+- Explicit runtime isolation. `TAVRA_COMMERCE_MODE=live` uses OAuth-linked Prava
+  MCP commerce. `sandbox` discovers an actual UAE merchant product, creates a
+  purchase-specific Prava approval, retrieves the one-time credential, attempts
+  the reviewed end-merchant checkout once, and records the expected test-card
+  decline. `disabled` performs no commerce. Tavra never silently changes modes.
+- Durable SQLite commerce workflows, checkout-to-card mappings, notification
+  outbox, and Linq event revisions. A separate permission-restricted recovery
+  ledger stores the confirmed incident, selected merchant variant, quote,
+  sanitized payment state, merchant order evidence, and claim packet state.
 - A permission-restricted JSONL recovery ledger containing the confirmed
   incident, delivery address, planned items, sanitized payment state,
   fulfillment truth disclosure, claim evidence, actual expenses, versioned
@@ -62,7 +73,7 @@ produce one concise, sensible reply in the same chat.
   response contracts that prevent early option disclosure, rejected-candidate
   selection, unsupported purchase claims, internal labels, and em dashes.
 - Same-chat text reply with a deterministic Linq idempotency key.
-- Persistent inbound event deduplication in `data/processed-events.jsonl`.
+- Persistent inbound event and attachment deduplication in `data/tavra.sqlite`.
 - A webhook setup command scoped to the configured Linq phone number.
 - Health endpoints and structured logs without message bodies or phone numbers.
 
@@ -72,13 +83,23 @@ produce one concise, sensible reply in the same chat.
 - A Linq Partner API V3 token and provisioned iMessage number.
 - An OpenAI API key with API billing enabled.
 - A Senso API key and a populated private identity map.
-- Prava sandbox publishable and secret keys.
+- A Prava account authorized for the MCP commerce scopes `payments:read`,
+  `payments:write`, and `checkout:run` for live commerce.
+- macOS Keychain and a browser for the current one-time Prava OAuth linker.
+- Prava sandbox publishable and secret keys for the end-to-end sandbox
+  capability check.
+- Playwright Chromium for the server-side end-merchant checkout attempt.
 - A public HTTPS URL forwarding to the local port. The current setup uses a
   Microsoft dev tunnel.
 
-### Product media assets
+### Product media
 
-The current eligible synthetic catalog requires these exact source assets:
+Merchant-backed modes accept only the exact HTTPS image returned with the
+selected UCP offer. The UAE sandbox path allowlists the reviewed Shopify CDN and
+never substitutes generated artwork. Redirects, private hosts, unsafe content
+types, oversized files, and missing images are rejected.
+
+The following local assets exist only for the explicitly selected sandbox mode:
 
 - `web/public/products/b-shirt-001.png`
 - `web/public/products/b-trouser-001.png`
@@ -89,9 +110,7 @@ Vite publishes them at the matching
 `recovery-bundle.png` is reserved for the single aggregate fallback line item;
 it is never substituted for one of the three SKU images. Demo imagery is always
 captioned as illustrative and is not merchant SKU evidence.
-Live merchant adapters should pass each verified catalog image as its original
-HTTPS URL and configure a merchant-host allowlist; they must not copy live
-catalog media into these synthetic filenames.
+They must never be shown as evidence for a live merchant product.
 
 ## Configure
 
@@ -109,11 +128,9 @@ OPENAI_ROUTER_MODEL=gpt-4o-mini
 SENSO_API_KEY=...
 SENSO_BASE_URL=https://apiv2.senso.ai/api/v1/
 SENSO_IDENTITY_MAP_PATH=senso/demo-config/identity-map.local.json
-PRAVA_API_KEY=pk_test_...
-PRAVA_SECRET_KEY=sk_test_...
-PRAVA_MODE=sandbox
-PRAVA_BACKEND_URL=https://sandbox.api.prava.space
-PRAVA_CHECKOUT_MODE=hosted
+# Live commerce is disabled until OAuth linking and address setup are complete.
+TAVRA_COMMERCE_MODE=disabled
+PRAVA_MCP_URL=https://mcp.pay.prava.space/mcp
 # Set these only after installing the signed Tavra Messages extension.
 TAVRA_MESSAGES_APP_TEAM_ID=
 TAVRA_MESSAGES_APP_BUNDLE_ID=com.yourcompany.tavra.MessagesExtension
@@ -121,15 +138,69 @@ TAVRA_MESSAGES_APP_NAME=Tavra
 PORT=3000
 ```
 
+The end-to-end sandbox path needs `PRAVA_API_KEY`,
+`PRAVA_SECRET_KEY`, `PRAVA_MODE=sandbox`, `PRAVA_BACKEND_URL`, and
+`PRAVA_CHECKOUT_MODE`. Live MCP commerce uses the OAuth token stored in Keychain
+and does not require those SDK credentials.
+
 `OPENAI_MODEL` is optional and defaults to the cost-efficient `gpt-5-mini`.
 `OPENAI_ROUTER_MODEL` defaults to `gpt-4o-mini`; exact greetings bypass it.
 Secret keys remain server-side and are never sent through Linq or included in
 logs. The identity map is also gitignored and must never be uploaded to Senso.
-Only the Prava publishable key, short-lived session token, and trusted iframe URL
-are exposed to the approval page.
+The sandbox approval page receives only the Prava publishable key, short-lived
+session token, and trusted iframe URL. In live mode, the native card receives a
+sanitized Tavra summary and the short Tavra approval URL redirects to the exact
+server-stored Prava payment target. MCP OAuth tokens never reach the extension,
+browser, chat, or public summary.
+
+`PRAVA_MODE` configures the Prava SDK path. `TAVRA_COMMERCE_MODE` selects
+the commerce runtime and is the authoritative live-versus-sandbox switch. Never
+set the commerce runtime to `sandbox` as a fallback for an unavailable live
+merchant.
 
 Never commit `.env`. When a subscription is created by the setup command, its
 one-time signing secret is saved to `.env` without being printed.
+
+### One-time Prava live-commerce setup
+
+The linker uses OAuth 2.1 discovery, dynamic client registration, PKCE, and the
+three required commerce scopes. It stores the resulting token set in macOS
+Keychain under `space.tavra.prava-mcp`, not in `.env` or Git.
+
+```bash
+npm run prava:link-commerce
+```
+
+The command opens Prava sign-in, verifies `ping`, `list_agents`,
+`shop_list_addresses`, `shop_search`, and, when a result exists, `shop_product`.
+It does not request a quote, create a payment session, or place an order.
+
+Before enabling live mode, the linked Prava account must contain a delivery
+address for the destination you will test. Tavra compares the user-confirmed
+address with Prava's masked saved-address summaries and quotes only against the
+selected Prava address ID. Add the address through an approved Prava surface or
+API using Prava's accepted UAE address format. Do not invent a postal code for
+MBZUAI, Masdar City, or any UAE destination.
+
+After linking and confirming that the masked address appears, set:
+
+```dotenv
+TAVRA_COMMERCE_MODE=live
+PRAVA_MCP_URL=https://mcp.pay.prava.space/mcp
+```
+
+Start Tavra and verify the access gate:
+
+```bash
+npm run dev:imessage
+curl https://your-public-tunnel.example/health/commerce
+```
+
+A ready response reports `status: "ready"`, live mode, and no missing scopes.
+For the live demo, also require `connectedAgents` to be at least one. A 503
+response is a hard stop for live commerce. Relink if scopes or tokens are
+missing. Add or select a valid saved address if discovery cannot match the
+confirmed destination.
 
 ## Run
 
@@ -220,6 +291,7 @@ npm run smoke:senso-openai
 npm run smoke:prava
 npm run smoke:webhook
 npm run build
+npm run test:ios
 ```
 
 `smoke:openai` makes one small Responses API request without using Linq.
@@ -230,19 +302,26 @@ Senso and OpenAI without sending an iMessage or creating a real Prava session.
 `smoke:prava` creates one sandbox session with synthetic identity data, validates
 the browser-safe handoff, and immediately revokes the session.
 
-After passkey verification, Prava returns the one-time credential while the
-session is `awaiting_result`. Tavra passes it to the configured sandbox merchant
-simulator, validates and reports that simulated result to Prava, then records a
-same-chat update. This creates no live merchant order, charge, dispatch, or
-delivery. Tavra can build and hash an airline claim packet from verified
-incident evidence and incurred expenses, record explicit handoff authorization,
-and open a reviewed official airline claim form. It does not claim external
-submission until an airline confirmation ID plus independent confirmation
-evidence is recorded. Employer-expense submission still requires a connector.
+In live mode, Tavra follows Prava's documented sequence:
+`shop_search -> shop_product -> shop_quote -> create_payment_session ->
+get_payment_status -> shop_checkout`. Only the final call creates an order.
+Tavra records a merchant order ID only when `shop_checkout` returns one with the
+approved amount. It records the order as incurred expense evidence, but it marks
+an itemized receipt verified only when the merchant returns one or the traveler
+uploads one. Airline submission and employer reimbursement remain external
+handoffs until those systems return independent confirmation.
+
+In explicit sandbox mode, Tavra uses Meddu UCP for product discovery
+and an address-bound checkout draft. After Prava approval it uses the returned
+one-time card in exactly one merchant checkout attempt. An insufficient-funds
+or test-card decline is the expected successful capability result, is reported
+back to Prava as declined, and is never recorded as an order or reimbursable
+expense. Unknown post-submit outcomes require reconciliation and are not retried.
 
 Plain iMessage cannot safely replace Prava's protected card/passkey ceremony.
-The default path is a rich preview card plus a preselected saved card when Prava
-has one. The implemented signed Tavra Messages extension path renders the
+The default path is a rich preview card followed by Prava's hosted card/passkey
+ceremony. Tavra intentionally does not preselect an old card for the first Meddu
+proof, because Prava cards can be merchant-scoped. The implemented signed Tavra Messages extension path renders the
 redacted itemized review and exact product thumbnails natively, then presents
 Prava in a Safari-controlled modal. It still cannot move Prava's protected
 card/passkey ceremony into a mutable message bubble. Setup and platform limits
@@ -259,13 +338,17 @@ ignored after the first successful send.
 
 ## Routes
 
-- `GET /` - service identity and active feature.
+- `GET /` - Tavra landing page.
 - `GET /health` - liveness check.
-- `GET /pay/:checkoutId` - short-lived secure approval page.
+- `GET /health/commerce` - live MCP readiness, granted-scope, and connected-agent check.
+- `GET /pay/:checkoutId` - short-lived handoff to the exact Prava approval URL
+  for live commerce, or the sandbox approval page in explicit sandbox mode.
 - `GET /api/prava/checkouts/:checkoutId/session` - browser-safe Prava session data.
 - `GET /api/prava/checkouts/:checkoutId/summary` - redacted checkout summary for
   the Tavra Messages extension; it excludes Prava keys, session tokens, and iframe URLs.
 - `GET /api/prava/checkouts/:checkoutId/status` - sanitized approval status.
+- `GET /api/prava/checkouts/:checkoutId/products/:index/image` - guarded
+  same-origin proxy for the exact selected UCP product image.
 - `POST /api/prava/checkouts/:checkoutId/revoke` - cancel a secure session.
 - `POST /webhooks/linq` - signed Linq webhook receiver.
 
@@ -276,6 +359,11 @@ Linq documentation: [Quickstart](https://docs.linqapp.com/getting-started/quicks
 OpenAI documentation: [text generation](https://developers.openai.com/api/docs/guides/text)
 [image inputs](https://developers.openai.com/api/docs/guides/images-vision), and
 [model guidance](https://developers.openai.com/api/docs/guides/latest-model).
+
+Prava live-commerce documentation: [MCP connection](https://docs.prava.space/mcp/connect),
+[MCP tools](https://docs.prava.space/mcp/tools),
+[UCP integration](https://docs.prava.space/integration/ucp), and
+[Browser Harness](https://docs.prava.space/integration/browser-harness).
 
 Hackathon readiness and production gaps are tracked in
 [`docs/HACKATHON_REQUIREMENTS.md`](docs/HACKATHON_REQUIREMENTS.md),

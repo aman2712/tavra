@@ -5,16 +5,22 @@ import { join } from "node:path";
 import test from "node:test";
 
 import type OpenAI from "openai";
+import { createSandboxAirlineClaimSubmissionProvider } from "../src/airline-claim.js";
 import type {
   CreatePravaCheckoutRequest,
   PravaCheckoutProvider,
 } from "../src/prava.js";
+import type {
+  MedduOffer,
+  MedduUcpClient,
+} from "../src/sandbox-merchant.js";
 import { createProductMediaResolver } from "../src/product-media.js";
 import {
   JsonlRecoveryCaseLedger,
   resolveAirlineSubmissionTarget,
   type RecoveryCaseRecord,
 } from "../src/recovery-case.js";
+import { InMemoryRecoveryStateStore } from "../src/recovery-state-store.js";
 
 import {
   createOpenAIIntentRouter,
@@ -32,14 +38,15 @@ import {
 import type {
   KnowledgeScope,
   SensoKnowledgeProvider,
+  SensoRecoveryOutcome,
 } from "../src/senso.js";
 
 const CONTEXT_REPLY =
   "Sorry, that’s a pain. I can help with replacement essentials and organize the baggage claim. Do you want basic clothing and toiletries, and where and when should they arrive?";
 const SIZE_REPLY =
-  "I can help with that. Here are the sizes on file:\n\n• T-shirt: M\n• Trouser waist: 32\n• Trouser inseam: not on file\n\nCan you confirm M and 32 and tell me your inseam?";
+  "I can help with that. My knowledge base has these sizes on file:\n\n• T-shirt: M\n• Trouser waist: 32\n• Trouser inseam: not on file\n\nCan you confirm M and 32 and tell me your inseam?";
 const OPTION_REPLY =
-  "Perfect, thanks. The sandbox catalog has one policy-matched option:\n\n• T-shirt: M\n• Trousers: 32x30\n• Toiletries: essential kit\n• Delivery: sandbox estimate before 7:00 AM\n• Total: sandbox quote $154 of your $175 allowance\n\nAnything you’d like to change?";
+  "Perfect, thanks. Here’s the policy-matched recovery option:\n\n• T-shirt: M\n• Trousers: 32x30\n• Toiletries: essential kit\n• Delivery: estimated before 07:00 local time\n• Total: $154 of your $175 allowance\n\nWant to change anything?";
 const INCIDENT_REPLY =
   "Perfect, I’ll keep that option as-is. I just need:\n\n• Airline\n• Arrival airport\n• Baggage reference, if you have one\n\nWhat should I put down?";
 const AIRLINE_REFERENCE_REPLY =
@@ -451,7 +458,38 @@ test("does not source until goal, area, deadline, and sizes are confirmed", asyn
   assert.deepEqual(scopes, ["profile", "team_recovery"]);
 });
 
-test("accepts a Boston hotel after the New York sandbox option is rejected", async () => {
+test("only an explicit stop command cancels recovery even when the interpreter is unclear", async () => {
+  const generator = createOpenAIReplyGenerator(
+    sequenceClient([CONTEXT_REPLY, SIZE_REPLY]),
+    "reply-model",
+    knowledgeProvider(),
+    fixedRouter("team_recovery"),
+    fixedInterpreter([
+      {
+        ...EMPTY_UPDATE,
+        action: "provide_recovery_context",
+        wantsEssentials: true,
+        deliveryArea: "Boston",
+        needBy: "8:00 AM",
+      },
+      EMPTY_UPDATE,
+    ]),
+  );
+  const turn = (message: string) =>
+    generator.generateReply({
+      message,
+      senderHandle: "+919876543210",
+      chatId: "chat-explicit-stop",
+    });
+
+  await turn("My baggage is delayed");
+  await turn("Yes, Boston by 8 AM");
+  const stopped = await turn("stop");
+  assert.match(stopped, /stop here/i);
+  assert.match(stopped, /nothing has been ordered or submitted/i);
+});
+
+test("keeps an arbitrary destination without exposing or forcing the catalog city", async () => {
   const generator = createOpenAIReplyGenerator(
     sequenceClient([CONTEXT_REPLY, SIZE_REPLY, OPTION_REPLY]),
     "reply-model",
@@ -467,7 +505,7 @@ test("accepts a Boston hotel after the New York sandbox option is rejected", asy
       {
         ...EMPTY_UPDATE,
         action: "provide_recovery_context",
-        deliveryArea: "New York",
+        deliveryArea: "Abu Dhabi",
       },
       {
         ...EMPTY_UPDATE,
@@ -475,31 +513,189 @@ test("accepts a Boston hotel after the New York sandbox option is rejected", asy
         confirmsOnFileSizes: true,
         trouserInseam: "30",
       },
-      EMPTY_UPDATE,
+      { ...EMPTY_UPDATE, action: "accept_bundle" },
     ]),
   );
   const turn = (message: string) =>
     generator.generateReply({
       message,
       senderHandle: "+919876543210",
-      chatId: "chat-catalog-area-switch",
+      chatId: "chat-location-neutral-sandbox",
     });
 
   await turn("My baggage got delayed");
   await turn("Yeah, before 7am");
-  await turn("New York");
-  const areaPrompt = await turn("Confirmed. 30.");
-  assert.match(areaPrompt, /verified Boston option/i);
-  assert.match(areaPrompt, /claim help only/i);
+  await turn("Abu Dhabi");
+  const option = await turn("Confirmed. 30.");
+  assert.match(option, /recovery option/i);
+  assert.match(option, /Delivery: being confirmed for your requested destination/i);
+  assert.match(option, /• Total: \$154 of your \$175 allowance/i);
+  assert.doesNotMatch(option, /Boston|before 7|sandbox|simulat|no live/i);
 
-  const option = await turn("Hilton Hotel Boston Park Plaza");
-  assert.equal(option, OPTION_REPLY);
-  assert.doesNotMatch(option, /Boston delivery or pickup location/i);
+  const addressPrompt = await turn("Looks good");
+  assert.match(addressPrompt, /Where should I send it/i);
+  assert.doesNotMatch(addressPrompt, /Boston/i);
 });
 
-test("moves to claim-only help when no supported catalog area is available", async () => {
+test("migrates a persisted city-switch session without repeating or exposing the old loop", async () => {
+  const recoveryStateStore = new InMemoryRecoveryStateStore();
+  const chatId = "chat-retired-sandbox-city-gate";
+  await recoveryStateStore.save(chatId, {
+    caseId: "RCV-LEGACY1",
+    senderHandle: "+919876543210",
+    startedAt: Date.now(),
+    stage: "awaiting_recovery_context",
+    employeeId: "emp_demo_001",
+    employeeAllowance: null,
+    originalMessage: "My baggage got delayed",
+    sizes: { tshirtSize: "M", trouserWaist: "32", trouserInseam: "30" },
+    confirmed: { tshirtSize: true, trouserWaist: true, trouserInseam: true },
+    airline: null,
+    arrivalAirport: null,
+    baggageReference: null,
+    noticeEvidence: null,
+    noticeConfirmed: false,
+    wantsEssentials: true,
+    needBy: "before 8 AM",
+    needByIso: null,
+    deliveryArea: null,
+    catalogAreaRequired: "Boston",
+    deliveryAddress: null,
+    deliveryAddressSource: null,
+    deliveryAddressConfirmed: false,
+    locationRequestedAt: null,
+    email: "employee@example.com",
+    emailConfirmed: false,
+    optionTotal: null,
+    proposedProducts: null,
+    checkout: null,
+    liveAddress: null,
+    liveOffer: null,
+    liveQuote: null,
+    liveRejectedVariantIds: [],
+    liveResumeAfterIncident: false,
+    livePurchaseAuthorizationEventId: null,
+  });
   const generator = createOpenAIReplyGenerator(
-    sequenceClient([CONTEXT_REPLY, SIZE_REPLY]),
+    sequenceClient([OPTION_REPLY]),
+    "reply-model",
+    bostonCatalogKnowledgeProvider(),
+    fixedRouter("team_recovery"),
+    fixedInterpreter([
+      {
+        ...EMPTY_UPDATE,
+        action: "provide_recovery_context",
+        deliveryArea: "Abu Dhabi",
+      },
+    ]),
+    undefined,
+    { recoveryStateStore },
+  );
+
+  const reply = await generator.generateReply({
+    message: "Abu Dhabi",
+    senderHandle: "+919876543210",
+    chatId,
+  });
+
+  assert.match(reply, /Delivery: being confirmed for your requested destination/i);
+  assert.doesNotMatch(reply, /Boston|sandbox|simulat|no live/i);
+  const migrated = await recoveryStateStore.load<{
+    catalogAreaRequired: string | null;
+    deliveryArea: string | null;
+  }>(chatId);
+  assert.equal(migrated?.catalogAreaRequired, null);
+  assert.equal(migrated?.deliveryArea, "Abu Dhabi");
+});
+
+test("repairs a persisted privacy placeholder before payment approval", async () => {
+  const recoveryStateStore = new InMemoryRecoveryStateStore();
+  const checkouts: CreatePravaCheckoutRequest[] = [];
+  const chatId = "chat-corrupt-private-address";
+  await recoveryStateStore.save(chatId, {
+    caseId: "RCV-PRIVATE1",
+    senderHandle: "+919876543210",
+    startedAt: Date.now(),
+    stage: "awaiting_payment_authorization",
+    employeeId: "emp_demo_001",
+    employeeAllowance: null,
+    originalMessage: "My baggage got delayed",
+    sizes: { tshirtSize: "M", trouserWaist: "32", trouserInseam: "30" },
+    confirmed: { tshirtSize: true, trouserWaist: true, trouserInseam: true },
+    airline: "Emirates",
+    arrivalAirport: "AUH",
+    baggageReference: "RF4929",
+    noticeEvidence: null,
+    noticeConfirmed: false,
+    wantsEssentials: true,
+    needBy: "8:00 AM tomorrow",
+    needByIso: null,
+    deliveryArea: "Abu Dhabi",
+    catalogAreaRequired: null,
+    deliveryAddress: "[delivery address omitted]",
+    deliveryAddressSource: "message",
+    deliveryAddressConfirmed: false,
+    locationRequestedAt: Date.now(),
+    email: "employee@example.com",
+    emailConfirmed: true,
+    optionTotal: "154.00",
+    proposedProducts: [
+      {
+        productRef: "demo-recovery-essentials",
+        description: "Recovery essentials",
+        unitPrice: "154.00",
+        quantity: 1,
+      },
+    ],
+    checkout: null,
+    liveAddress: null,
+    liveOffer: null,
+    liveQuote: null,
+    liveRejectedVariantIds: [],
+    liveResumeAfterIncident: false,
+    livePurchaseAuthorizationEventId: null,
+  });
+  const generator = createOpenAIReplyGenerator(
+    sequenceClient([]),
+    "reply-model",
+    knowledgeProvider(),
+    fixedRouter("team_recovery"),
+    fixedInterpreter(),
+    {
+      async createCheckout(request) {
+        checkouts.push(request);
+        return {
+          checkoutId: "checkout-should-not-exist",
+          url: "https://tavra.example/pay/checkout-should-not-exist",
+          expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        };
+      },
+    },
+    { recoveryStateStore },
+  );
+
+  const reply = await generator.generateReply({
+    message: "Yes",
+    senderHandle: "+919876543210",
+    chatId,
+  });
+
+  assert.match(reply, /Where should I send it/i);
+  assert.doesNotMatch(reply, /temporary issue|delivery address omitted/i);
+  assert.equal(checkouts.length, 0);
+  const repaired = await recoveryStateStore.load<{
+    stage: string;
+    deliveryAddress: string | null;
+    deliveryAddressConfirmed: boolean;
+  }>(chatId);
+  assert.equal(repaired?.stage, "awaiting_delivery_address");
+  assert.equal(repaired?.deliveryAddress, null);
+  assert.equal(repaired?.deliveryAddressConfirmed, false);
+});
+
+test("offers claim-only help without asking the employee to relocate", async () => {
+  const generator = createOpenAIReplyGenerator(
+    sequenceClient([CONTEXT_REPLY, SIZE_REPLY, OPTION_REPLY]),
     "reply-model",
     bostonCatalogKnowledgeProvider(),
     fixedRouter("team_recovery"),
@@ -513,7 +709,7 @@ test("moves to claim-only help when no supported catalog area is available", asy
       {
         ...EMPTY_UPDATE,
         action: "provide_recovery_context",
-        deliveryArea: "New York",
+        deliveryArea: "Abu Dhabi",
       },
       {
         ...EMPTY_UPDATE,
@@ -521,7 +717,7 @@ test("moves to claim-only help when no supported catalog area is available", asy
         confirmsOnFileSizes: true,
         trouserInseam: "30",
       },
-      EMPTY_UPDATE,
+      { ...EMPTY_UPDATE, action: "accept_bundle" },
       {
         ...EMPTY_UPDATE,
         action: "provide_incident_details",
@@ -540,13 +736,14 @@ test("moves to claim-only help when no supported catalog area is available", asy
 
   await turn("My baggage got delayed");
   await turn("Yeah, before 7am");
-  await turn("New York");
+  await turn("Abu Dhabi");
   await turn("Confirmed. 30.");
-  const claimPrompt = await turn("No");
-  assert.match(claimPrompt, /won.t present the Boston option/i);
+  await turn("Looks good");
+  const claimPrompt = await turn("Claim only");
+  assert.match(claimPrompt, /won.t continue with the purchase flow/i);
   assert.match(claimPrompt, /baggage-claim evidence/i);
   assert.match(claimPrompt, /• Airline/);
-  assert.doesNotMatch(claimPrompt, /Boston delivery or pickup location/i);
+  assert.doesNotMatch(claimPrompt, /Boston|sandbox|simulat|no live/i);
 
   const draft = await turn("Delta, JFK, RF392942");
   assert.match(draft, /claim draft/i);
@@ -623,9 +820,11 @@ test("collects and confirms an exact delivery address before incident or payment
       { ...EMPTY_UPDATE, action: "accept_bundle" },
       {
         ...EMPTY_UPDATE,
-        deliveryAddress: "1 Hotel Drive, Boston, MA, front desk",
+        action: "provide_incident_details",
+        airline: "Emirates",
+        arrivalAirport: "AUH",
+        baggageReference: "RF392942",
       },
-      { ...EMPTY_UPDATE, action: "confirm_delivery_address", confirmsDeliveryAddress: true },
     ]),
   );
   const turn = (message: string) =>
@@ -646,8 +845,11 @@ test("collects and confirms an exact delivery address before incident or payment
   assert.match(proposal, /1 Hotel Drive/);
   assert.match(proposal, /exact delivery address/i);
 
-  const incidentPrompt = await turn("Yes, that is exact");
+  const incidentPrompt = await turn("Yes, add room 308");
   assert.equal(incidentPrompt, INCIDENT_REPLY);
+
+  const summary = await turn("Emirates, AUH, RF392942");
+  assert.match(summary, /Deliver to: 1 Hotel Drive, Boston, MA, front desk, Room 308/i);
 });
 
 test("automatically proposes a fresh address when Linq reports location sharing", async () => {
@@ -722,6 +924,70 @@ test("automatically proposes a fresh address when Linq reports location sharing"
   assert.equal(generator.chatForLocationShare("+919876543210"), null);
 });
 
+test("retries a delayed Linq location when the employee replies shared", async () => {
+  const activity: string[] = [];
+  let reads = 0;
+  const generator = createOpenAIReplyGenerator(
+    sequenceClient([CONTEXT_REPLY, SIZE_REPLY, OPTION_REPLY]),
+    "reply-model",
+    knowledgeProvider(),
+    fixedRouter("team_recovery"),
+    fixedInterpreter([
+      {
+        ...EMPTY_UPDATE,
+        action: "provide_recovery_context",
+        wantsEssentials: true,
+        deliveryArea: "Abu Dhabi",
+        needBy: "8:00 AM tomorrow",
+      },
+      {
+        ...EMPTY_UPDATE,
+        action: "confirm_sizes",
+        confirmsOnFileSizes: true,
+        trouserInseam: "30",
+      },
+      { ...EMPTY_UPDATE, action: "accept_bundle" },
+    ]),
+    undefined,
+    {
+      locationProvider: {
+        async request() {
+          activity.push("request");
+        },
+        async getCurrent() {
+          reads += 1;
+          activity.push(`retrieve-${reads}`);
+          if (reads === 1) return null;
+          return {
+            address: "Solar Building, MBZUAI, Masdar City, Abu Dhabi",
+            locality: "Abu Dhabi",
+            coordinates: [54.616, 24.431] as [number, number],
+            updatedAt: new Date().toISOString(),
+          };
+        },
+      },
+    },
+  );
+  const turn = (message: string) =>
+    generator.generateReply({
+      message,
+      senderHandle: "+919876543210",
+      chatId: "chat-location-shared-retry",
+    });
+
+  await turn("My baggage is delayed");
+  await turn("Yes, Abu Dhabi by 8 AM tomorrow");
+  await turn("Sizes are right, inseam 30");
+  await turn("Looks good");
+  await turn("Share my location");
+  const proposal = await turn("Shared");
+
+  assert.match(proposal, /Solar Building, MBZUAI/i);
+  assert.match(proposal, /exact delivery address/i);
+  assert.deepEqual(activity, ["request", "retrieve-1", "retrieve-2"]);
+  assert.equal(generator.chatForLocationShare("+919876543210"), null);
+});
+
 test("creates one address-bound checkout and exposes the Prava URL as a rich link", async () => {
   const checkouts: CreatePravaCheckoutRequest[] = [];
   const checkoutProvider: PravaCheckoutProvider = {
@@ -756,15 +1022,11 @@ test("creates one address-bound checkout and exposes the Prava URL as a rich lin
       { ...EMPTY_UPDATE, action: "accept_bundle" },
       {
         ...EMPTY_UPDATE,
-        deliveryAddress: "1 Hotel Drive, Boston, MA, front desk",
-      },
-      { ...EMPTY_UPDATE, action: "confirm_delivery_address", confirmsDeliveryAddress: true },
-      {
-        ...EMPTY_UPDATE,
         action: "provide_incident_details",
         airline: "Delta",
         arrivalAirport: "BOS",
         baggageReference: "RF392942",
+        deliveryAddress: "[delivery address omitted]",
       },
     ]),
     checkoutProvider,
@@ -777,6 +1039,16 @@ test("creates one address-bound checkout and exposes the Prava URL as a rich lin
     });
 
   await turn("My baggage is delayed");
+  assert.equal(
+    await generator.generateReactionReply?.({
+      chatId: "chat-prava",
+      senderHandle: "+919876543210",
+      targetMessageId: "not-an-approval-summary",
+      eventId: "reaction-too-early",
+      reactedAt: "2026-08-01T12:00:00.000Z",
+    }),
+    null,
+  );
   await turn("Yes, Boston by 8 AM");
   await turn("M and 32 are right, inseam 30");
   await turn("Looks good");
@@ -786,9 +1058,39 @@ test("creates one address-bound checkout and exposes the Prava URL as a rich lin
   assert.match(summary, /exact approval summary/i);
   assert.match(summary, /1 Hotel Drive/);
   assert.match(summary, /employee@example\.com/i);
+  assert.match(
+    summary,
+    /Reply yes or react with 👍 to create the Prava approval for this summary, or tell me what to change\./,
+  );
   assert.equal(checkouts.length, 0);
 
-  const approval = await turn("Yes, create the approval");
+  await generator.recordSentReply?.({
+    chatId: "chat-prava",
+    eventId: "summary-event",
+    messageId: "summary-message",
+    reply: summary,
+  });
+  assert.equal(
+    await generator.generateReactionReply?.({
+      chatId: "chat-prava",
+      senderHandle: "+919876543210",
+      targetMessageId: "older-summary-message",
+      eventId: "stale-reaction",
+      reactedAt: "2026-08-01T12:01:00.000Z",
+    }),
+    null,
+  );
+  assert.equal(checkouts.length, 0);
+
+  const approval = await generator.generateReactionReply?.({
+    chatId: "chat-prava",
+    senderHandle: "+919876543210",
+    targetMessageId: "summary-message",
+    eventId: "thumbs-up-reaction",
+    reactedAt: "2026-08-01T12:02:00.000Z",
+  });
+  assert.equal(typeof approval, "string");
+  if (typeof approval !== "string") throw new Error("Expected approval reply");
   assert.match(approval, /Tap the single card below/i);
   assert.doesNotMatch(approval, /https:\/\//);
   assert.deepEqual(generator.consumePresentation?.("chat-prava"), {
@@ -807,9 +1109,20 @@ test("creates one address-bound checkout and exposes the Prava URL as a rich lin
     checkouts[0]?.products.map((product) => product.productRef),
     ["b-shirt-001", "b-trouser-001", "b-toiletry-001"],
   );
+  assert.equal(
+    await generator.generateReactionReply?.({
+      chatId: "chat-prava",
+      senderHandle: "+919876543210",
+      targetMessageId: "summary-message",
+      eventId: "second-thumbs-up-reaction",
+      reactedAt: "2026-08-01T12:03:00.000Z",
+    }),
+    null,
+  );
+  assert.equal(checkouts.length, 1);
 });
 
-test("keeps product images together for the later Messages review card", async () => {
+test("shows one combined product preview before approval without environment disclosures", async () => {
   const generator = createOpenAIReplyGenerator(
     sequenceClient([CONTEXT_REPLY, SIZE_REPLY, OPTION_REPLY]),
     "reply-model",
@@ -855,7 +1168,158 @@ test("keeps product images together for the later Messages review card", async (
     senderHandle: "+919876543210",
     chatId: "chat-product-image",
   });
+  const presentation = generator.consumePresentation?.("chat-product-image");
+  assert.ok(presentation);
+  assert.equal(presentation.productMedia?.length, 1);
+  assert.equal(
+    presentation.productMedia?.[0]?.productRef,
+    "demo-recovery-essentials",
+  );
+  assert.match(
+    presentation.productMedia?.[0]?.url ?? "",
+    /\/checkout-assets\/products\/recovery-bundle\.png$/,
+  );
+  assert.equal(
+    presentation.productMedia?.[0]?.caption,
+    "Recovery essentials preview",
+  );
+  assert.doesNotMatch(
+    presentation.productMedia?.[0]?.caption ?? "",
+    /sandbox|simulat|no live/i,
+  );
+  assert.equal(presentation.appCard, undefined);
+  assert.equal(presentation.linkUrl, undefined);
   assert.equal(generator.consumePresentation?.("chat-product-image"), null);
+});
+
+test("binds a real merchant image and address-aware AED total into Prava approval", async () => {
+  const checkouts: CreatePravaCheckoutRequest[] = [];
+  const checkoutProvider: PravaCheckoutProvider = {
+    async createCheckout(request) {
+      checkouts.push(structuredClone(request));
+      return {
+        checkoutId: "merchant-checkout-test",
+        url: "https://tavra.example/pay/merchant-checkout-test",
+        expiresAt: "2026-08-02T20:00:00.000Z",
+      };
+    },
+  };
+  const offer: MedduOffer = {
+    merchant: { name: "Meddu", domain: "meddu.com", country: "AE" },
+    productId: "gid://shopify/Product/123",
+    variantId: "gid://shopify/ProductVariant/46624128270499",
+    title: "Sensodyne Deep Clean Gel Toothpaste - 75ml",
+    variantTitle: "Default Title",
+    description: "Travel recovery toiletry essential",
+    available: true,
+    imageUrl: "https://cdn.shopify.com/s/files/1/product.jpg",
+    checkoutUrl: "https://edqvrb-i5.myshopify.com/cart/46624128270499:1",
+    price: { amount: "47.81", currency: "AED", minorAmount: "4781" },
+    provenance: {
+      source: "merchant_ucp",
+      merchantDomain: "meddu.com",
+      endpoint: "https://meddu.com/api/ucp/mcp",
+      retrievedAt: "2026-08-02T12:00:00.000Z",
+    },
+  };
+  let draftAddress = "";
+  const sandboxMerchant: MedduUcpClient = {
+    async discoverRecoveryOffer() {
+      return structuredClone(offer);
+    },
+    async createCheckout(input) {
+      return this.createCheckoutDraft(input);
+    },
+    async createCheckoutDraft(input) {
+      draftAddress = input.shippingAddress.streetAddress;
+      return {
+        merchant: offer.merchant,
+        offer: structuredClone(offer),
+        checkoutUrl: "https://edqvrb-i5.myshopify.com/checkouts/example",
+        checkoutId: "ucp-checkout-1",
+        status: "incomplete",
+        total: { amount: "63.81", currency: "AED", minorAmount: "6381" },
+        source: "ucp_checkout",
+        preparedAt: "2026-08-02T12:01:00.000Z",
+      };
+    },
+  };
+  const generator = createOpenAIReplyGenerator(
+    sequenceClient([CONTEXT_REPLY, SIZE_REPLY, INCIDENT_REPLY]),
+    "reply-model",
+    knowledgeProvider(),
+    fixedRouter("team_recovery"),
+    fixedInterpreter([
+      {
+        ...EMPTY_UPDATE,
+        action: "provide_recovery_context",
+        wantsEssentials: true,
+        deliveryArea: "Abu Dhabi",
+        needBy: "8:00 AM tomorrow",
+      },
+      {
+        ...EMPTY_UPDATE,
+        action: "confirm_sizes",
+        confirmsOnFileSizes: true,
+        trouserInseam: "30",
+      },
+      {
+        ...EMPTY_UPDATE,
+        action: "accept_bundle",
+      },
+      {
+        ...EMPTY_UPDATE,
+        action: "provide_incident_details",
+        airline: "Emirates",
+        arrivalAirport: "AUH",
+        baggageReference: "RF392942",
+      },
+    ]),
+    checkoutProvider,
+    {
+      sandboxMerchant,
+      productMediaResolver: createProductMediaResolver({
+        publicBaseUrl: "https://tavra.example",
+        liveMediaUrlAllowed: (url) => url.hostname === "cdn.shopify.com",
+      }),
+    },
+  );
+  const turn = (message: string) =>
+    generator.generateReply({
+      message,
+      senderHandle: "+971501234567",
+      chatId: "chat-real-sandbox-merchant",
+    });
+
+  await turn("My baggage is delayed");
+  await turn("Yes, Abu Dhabi by 8 AM tomorrow");
+  const option = await turn("M and 32 are correct, inseam 30");
+  assert.match(option, /Meddu/i);
+  assert.match(option, /AED 47\.81/i);
+  const preview = generator.consumePresentation("chat-real-sandbox-merchant");
+  assert.equal(preview?.productMedia?.[0]?.url, offer.imageUrl);
+  assert.equal(preview?.productMedia?.[0]?.source.kind, "official_merchant_asset");
+
+  await turn("Looks good");
+  await turn("MBZUAI, Masdar City, Abu Dhabi, Building 1, front desk");
+  await turn("Yes");
+  assert.match(draftAddress, /MBZUAI/i);
+  const summary = await turn("Emirates, AUH, RF392942");
+  assert.match(summary, /AED 63\.81/i);
+  await turn("Yes");
+
+  assert.equal(checkouts.length, 1);
+  assert.equal(checkouts[0]?.currency, "AED");
+  assert.equal(checkouts[0]?.totalAmount, "63.81");
+  assert.deepEqual(
+    checkouts[0]?.products.map((product) => product.unitPrice),
+    ["47.81", "16.00"],
+  );
+  assert.equal(checkouts[0]?.products[0]?.imageUrl, offer.imageUrl);
+  assert.equal(
+    checkouts[0]?.products[0]?.checkoutUrl,
+    "https://edqvrb-i5.myshopify.com/checkouts/example",
+  );
 });
 
 test("reads an image-only baggage notice and asks the employee to confirm extracted facts", async () => {
@@ -867,10 +1331,17 @@ test("reads an image-only baggage notice and asks the employee to confirm extrac
     arrival_airport: "BOS",
     baggage_reference: "RF392942",
     flight_number: "DL123",
-    passenger_name: "Aman Khan",
+    passenger_name: "Demo Traveler",
     incident_date: "2026-08-02",
     summary: "Delayed baggage notice",
-    uncertain_fields: [],
+    uncertain_fields: [
+      "passenger_name",
+      "airline",
+      "flight_number",
+      "arrival_airport",
+      "incident_date",
+      "baggage_reference",
+    ],
   });
   const generator = createOpenAIReplyGenerator(
     sequenceClient([evidence], requests),
@@ -899,6 +1370,8 @@ test("reads an image-only baggage notice and asks the employee to confirm extrac
   assert.match(review, /• Arrival airport: BOS/);
   assert.match(review, /• Baggage reference: RF392942/);
   assert.match(review, /correct\?/i);
+  assert.doesNotMatch(review, /couldn.t read with confidence/i);
+  assert.doesNotMatch(review, /passenger_name|flight_number|incident_date/i);
   const input = requests[0]?.input as Array<{ content?: Array<{ type?: string }> }>;
   assert.equal(input[0]?.content?.some((part) => part.type === "input_image"), true);
 
@@ -911,7 +1384,7 @@ test("reads an image-only baggage notice and asks the employee to confirm extrac
   assert.doesNotMatch(next, /meeting/i);
 });
 
-test("saves a notice during active intake without resetting the current question", async () => {
+test("silently saves a notice during active intake without resetting the current question", async () => {
   const evidence = JSON.stringify({
     is_baggage_notice: true,
     incident_type: "delayed_baggage",
@@ -919,7 +1392,7 @@ test("saves a notice during active intake without resetting the current question
     arrival_airport: "BOS",
     baggage_reference: "RF392942",
     flight_number: "DL123",
-    passenger_name: "Aman Khan",
+    passenger_name: "Demo Traveler",
     incident_date: "2026-08-02",
     summary: "Delayed baggage notice",
     uncertain_fields: [],
@@ -930,7 +1403,6 @@ test("saves a notice during active intake without resetting the current question
     knowledgeProvider(),
     fixedRouter("team_recovery"),
     fixedInterpreter([
-      { ...EMPTY_UPDATE, action: "unclear" },
       {
         ...EMPTY_UPDATE,
         action: "provide_recovery_context",
@@ -960,9 +1432,7 @@ test("saves a notice during active intake without resetting the current question
       },
     ],
   });
-  assert.match(noticeReply, /saved the baggage notice/i);
-  assert.match(noticeReply, /where|city|area/i);
-  assert.doesNotMatch(noticeReply, /Are these details correct/i);
+  assert.equal(noticeReply, "");
 
   const next = await generator.generateReply({
     message: "Boston by 7 AM",
@@ -971,6 +1441,100 @@ test("saves a notice during active intake without resetting the current question
   });
   assert.match(next, /T-shirt/i);
   assert.match(next, /trouser/i);
+});
+
+test("uses an image-only notice at incident intake and resumes with the extracted facts", async () => {
+  const requests: Record<string, unknown>[] = [];
+  const evidence = JSON.stringify({
+    is_baggage_notice: true,
+    incident_type: "delayed_baggage",
+    airline: "Emirates",
+    arrival_airport: "AUH",
+    baggage_reference: "RF392942",
+    flight_number: "EY123",
+    passenger_name: "Demo Traveler",
+    incident_date: "2026-08-02",
+    summary: "Delayed baggage notice",
+    uncertain_fields: [],
+  });
+  const generator = createOpenAIReplyGenerator(
+    sequenceClient(
+      [CONTEXT_REPLY, SIZE_REPLY, OPTION_REPLY, INCIDENT_REPLY, evidence],
+      requests,
+    ),
+    "reply-model",
+    knowledgeProvider(),
+    fixedRouter("team_recovery"),
+    fixedInterpreter([
+      {
+        ...EMPTY_UPDATE,
+        action: "provide_recovery_context",
+        wantsEssentials: true,
+        deliveryArea: "Boston",
+        needBy: "8:00 AM",
+      },
+      {
+        ...EMPTY_UPDATE,
+        action: "confirm_sizes",
+        confirmsOnFileSizes: true,
+        trouserInseam: "30",
+      },
+      { ...EMPTY_UPDATE, action: "accept_bundle" },
+    ]),
+  );
+  const turn = (message: string) =>
+    generator.generateReply({
+      message,
+      senderHandle: "+919876543210",
+      chatId: "chat-notice-at-incident-intake",
+    });
+
+  await turn("My baggage is delayed");
+  await turn("Yes, Boston by 8 AM");
+  await turn("Confirmed. Inseam 30.");
+  await turn("Looks good");
+  await turn("1 Hotel Drive, Boston, MA, front desk");
+  const incidentPrompt = await turn("Yes, that is exact");
+  assert.equal(incidentPrompt, INCIDENT_REPLY);
+
+  const review = await generator.generateReply({
+    message: "",
+    senderHandle: "+919876543210",
+    chatId: "chat-notice-at-incident-intake",
+    attachments: [
+      {
+        id: "attachment-incident-notice",
+        filename: "baggage-delay.png",
+        mimeType: "image/png",
+        sizeBytes: 120_000,
+        url: "https://cdn.linqapp.com/attachments/baggage-delay.png",
+      },
+    ],
+  });
+
+  assert.match(review, /baggage-disruption notice/i);
+  assert.match(review, /• Airline: Emirates/);
+  assert.match(review, /• Arrival airport: AUH/);
+  assert.match(review, /• Baggage reference: RF392942/);
+  assert.match(review, /correct\?/i);
+  const imageRequest = requests.at(-1)?.input as Array<{
+    content?: Array<{ type?: string }>;
+  }>;
+  assert.equal(
+    imageRequest?.[0]?.content?.some((part) => part.type === "input_image"),
+    true,
+  );
+
+  const summary = await turn("Yes");
+  assert.match(summary, /exact approval summary/i);
+  assert.match(summary, /• Airline: Emirates/);
+  assert.match(summary, /• Arrival airport: AUH/);
+  assert.match(summary, /• Baggage reference: RF392942/);
+  assert.match(summary, /employee@example\.com/i);
+  assert.doesNotMatch(
+    summary,
+    /I just need|What should I put down|missing.*(?:airline|airport|reference)/i,
+  );
 });
 
 test("retries a baggage notice when image extraction exhausts its output budget", async () => {
@@ -1191,6 +1755,7 @@ test("uses a valid deterministic size intake when both model drafts miss the ope
   assert.match(reply, /^Got it\. I can help/i);
   assert.equal(reply.match(/^• /gm)?.length, 3);
   assert.equal(reply.match(/\?/g)?.length, 1);
+  assert.match(reply, /knowledge base/i);
   assert.match(reply, /• T-shirt: M/);
   assert.match(reply, /• Trouser waist: 32/);
   assert.match(reply, /• Trouser inseam: not on file/);
@@ -1228,6 +1793,42 @@ test("rejects a size-intake draft that claims sourcing has started", async () =>
 
   assert.match(reply, /^Got it\. I can help/i);
   assert.doesNotMatch(reply, /I(?:'|’)ll source|sourcing/i);
+  assert.match(reply, /knowledge base/i);
+});
+
+test("rejects a size-intake draft that omits knowledge-base provenance", async () => {
+  const noProvenance =
+    "Got it. Here are the sizes on file:\n\n• T-shirt: M\n• Trouser waist: 32\n• Trouser inseam: not on file\n\nCan you confirm M and 32 and tell me your inseam?";
+  const generator = createOpenAIReplyGenerator(
+    sequenceClient([CONTEXT_REPLY, noProvenance, noProvenance]),
+    "reply-model",
+    knowledgeProvider(),
+    fixedRouter("team_recovery"),
+    fixedInterpreter([
+      {
+        ...EMPTY_UPDATE,
+        action: "provide_recovery_context",
+        wantsEssentials: true,
+        deliveryArea: "Boston",
+        needBy: "8:00 AM",
+      },
+    ]),
+  );
+
+  await generator.generateReply({
+    message: "My baggage is delayed",
+    senderHandle: "+919876543210",
+    chatId: "chat-size-knowledge-provenance",
+  });
+  const reply = await generator.generateReply({
+    message: "I need essentials in Boston before 8 AM",
+    senderHandle: "+919876543210",
+    chatId: "chat-size-knowledge-provenance",
+  });
+
+  assert.match(reply, /^Got it\. I can help.*knowledge base/is);
+  assert.match(reply, /• Trouser inseam: not on file/i);
+  assert.doesNotMatch(reply, /—/);
 });
 
 test("rejects a size draft that mentions a missing field without marking it missing", async () => {
@@ -1441,6 +2042,7 @@ test("validates deterministic size intake for every stored-size combination", as
 
     assert.equal(reply.match(/^• /gm)?.length, 3, `combination ${index}`);
     assert.equal(reply.match(/\?/g)?.length, 1, `combination ${index}`);
+    assert.match(reply, /knowledge base/i, `combination ${index}`);
     assert.doesNotMatch(reply, /unknown/i, `combination ${index}`);
     for (const [label, value] of [
       ["T-shirt", sizes.tshirtSize],
@@ -1524,15 +2126,6 @@ test("uses a complete deterministic incident-details prompt when both drafts fai
         trouserInseam: "30",
       },
       { ...EMPTY_UPDATE, action: "accept_bundle" },
-      {
-        ...EMPTY_UPDATE,
-        deliveryAddress: "1 Hotel Drive, Boston, MA, front desk",
-      },
-      {
-        ...EMPTY_UPDATE,
-        action: "confirm_delivery_address",
-        confirmsDeliveryAddress: true,
-      },
     ]),
   );
   const chatId = "chat-incident-fallback";
@@ -1689,6 +2282,7 @@ test("reports the latest durable recovery and reimbursement status", async () =>
       merchantOrderId: null,
       disclosure: "No live merchant order.",
     },
+    commerce: null,
     reimbursement: {
       airlineClaimStatus: "draft",
       employerExpenseStatus: "draft",
@@ -1756,6 +2350,12 @@ test("reports the latest durable recovery and reimbursement status", async () =>
         async recordPayment() {
           throw new Error("not used");
         },
+        async saveLiveCommercePrepared() {
+          throw new Error("not used");
+        },
+        async recordLiveCommerce() {
+          throw new Error("not used");
+        },
         async get() {
           return null;
         },
@@ -1772,7 +2372,8 @@ test("reports the latest durable recovery and reimbursement status", async () =>
     chatId: record.chatId,
   });
   assert.match(reply, /RCV-STATUS1/);
-  assert.match(reply, /no live merchant order or charge/i);
+  assert.match(reply, /secure Prava approval complete; recovery case updated/i);
+  assert.doesNotMatch(reply, /sandbox|simulat|no live/i);
   assert.match(reply, /Airline claim: draft, not submitted/i);
   assert.match(reply, /verified itemized merchant receipt/i);
 });
@@ -1865,4 +2466,162 @@ test("prepares and authorizes only a manual airline claim handoff from chat", as
     "authorized_for_handoff",
   );
   assert.equal(stored?.reimbursement.submission, null);
+});
+
+test("a bare yes submits only an awaiting sandbox packet and writes the outcome to Senso", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "tavra-sandbox-claim-chat-"));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const ledger = new JsonlRecoveryCaseLedger(join(directory, "cases.jsonl"));
+  const caseId = "RCV-CLAIMDEMO";
+  const chatId = "chat-sandbox-claim";
+  const senderHandle = "+15555550123";
+  const products = [
+    {
+      productRef: "b-shirt-001",
+      description: "Neutral basic T-shirt, size M",
+      unitPrice: "54.00",
+      quantity: 1,
+    },
+  ];
+  await ledger.savePrepared({
+    caseId,
+    chatId,
+    employeeId: "emp-claim",
+    employeePhone: senderHandle,
+    recovery: {
+      caseId,
+      needBy: "8 AM tomorrow",
+      deliveryArea: "Abu Dhabi",
+      deliveryAddress: "Masdar City, Abu Dhabi",
+      deliveryAddressSource: "message",
+      airline: "Emirates",
+      arrivalAirport: "AUH",
+      baggageReference: "RF392942",
+      noticeAttachmentIds: ["notice-1"],
+    },
+    products,
+    totalAmount: "54.00",
+    currency: "USD",
+    checkoutId: "checkout-sandbox-claim",
+    incidentEvidence: {
+      passengerName: "Demo Traveler",
+      flightNumber: "EK202",
+      incidentDate: "2026-08-02",
+    },
+  });
+  await ledger.addClaimEvidence({
+    caseId,
+    evidenceId: "EVD-SANDBOX-NOTICE",
+    kind: "baggage_delay_notice",
+    source: "linq_attachment",
+    description: "Employee-confirmed delayed baggage notice",
+    verification: "verified",
+    attachmentId: "notice-1",
+  });
+  const paid = await ledger.recordPayment({
+    chatId,
+    checkoutId: "checkout-sandbox-claim",
+    status: "completed",
+    pravaOrderId: "prava-order-1",
+    merchantOrderId: "demo-order-1",
+    totalAmount: "54.00",
+    currency: "USD",
+    employeeId: "emp-claim",
+    employeePhone: senderHandle,
+    products,
+    recovery: {
+      caseId,
+      needBy: "8 AM tomorrow",
+      deliveryArea: "Abu Dhabi",
+      deliveryAddress: "Masdar City, Abu Dhabi",
+      deliveryAddressSource: "message",
+      airline: "Emirates",
+      arrivalAirport: "AUH",
+      baggageReference: "RF392942",
+      noticeAttachmentIds: ["notice-1"],
+    },
+    merchantOutcome: "simulated",
+  });
+  assert.ok(paid);
+  assert.deepEqual(paid.reimbursement.blockers, []);
+  await ledger.recordReimbursementPacketUploaded({
+    caseId,
+    environment: "sandbox",
+    packetHash: paid.reimbursement.claimPacket.packetHash,
+    attachmentId: "attachment-packet-1",
+    filename: "tavra-emirates-reimbursement-packet.pdf",
+    sha256: "b".repeat(64),
+  });
+  await ledger.markReimbursementAwaitingConfirmation({
+    caseId,
+    packetHash: paid.reimbursement.claimPacket.packetHash,
+  });
+
+  const recordedOutcomes: SensoRecoveryOutcome[] = [];
+  const baseKnowledge = knowledgeProvider();
+  const provider = {
+    getKnowledge: baseKnowledge.getKnowledge.bind(baseKnowledge),
+    async recordRecoveryOutcome(
+      _senderHandle: string,
+      outcome: SensoRecoveryOutcome,
+    ) {
+      recordedOutcomes.push(outcome);
+      return {
+        employeeId: "emp-claim",
+        contentId: "22222222-2222-4222-8222-222222222222",
+      };
+    },
+  };
+  const generator = createOpenAIReplyGenerator(
+    {
+      responses: {
+        async create() {
+          throw new Error("model should not run for sandbox claim confirmation");
+        },
+      },
+    } as unknown as OpenAI,
+    "reply-model",
+    provider,
+    fixedRouter("social"),
+    fixedInterpreter(),
+    undefined,
+    {
+      caseLedger: ledger,
+      airlineClaimSubmissionProvider:
+        createSandboxAirlineClaimSubmissionProvider({
+          now: () => new Date("2026-08-02T18:00:00.000Z"),
+        }),
+    },
+  );
+
+  const no = await generator.generateReply({
+    message: "No",
+    senderHandle,
+    chatId,
+  });
+  assert.match(no, /keep the reimbursement packet ready/i);
+  assert.equal(
+    (await ledger.get(caseId))?.reimbursement.handoff?.state,
+    "awaiting_confirmation",
+  );
+
+  const reply = await generator.generateReply({
+    message: "Yes",
+    senderHandle,
+    chatId,
+  });
+  assert.match(reply, /sent reimbursement packet RCV-CLAIMDEMO to Emirates/i);
+  assert.match(reply, /3-5 business days/i);
+  assert.match(reply, /knowledge record: updated/i);
+  assert.doesNotMatch(reply, /sandbox|simulat|—/i);
+  assert.equal(recordedOutcomes.length, 1);
+  assert.equal(recordedOutcomes[0]?.status, "reimbursement_submitted");
+  assert.equal(recordedOutcomes[0]?.companyNotified, true);
+  const stored = await ledger.get(caseId);
+  assert.equal(stored?.reimbursement.handoff?.state, "submitted");
+  assert.equal(stored?.reimbursement.submission?.environment, "sandbox");
+  assert.equal(
+    stored?.reimbursement.submission?.companyNotificationId,
+    "22222222-2222-4222-8222-222222222222",
+  );
 });

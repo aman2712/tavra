@@ -1,4 +1,7 @@
-import type { MessageReceivedWebhookEvent } from "@linqapp/sdk/resources/webhooks";
+import type {
+  MessageReceivedWebhookEvent,
+  ReactionAddedWebhookEvent,
+} from "@linqapp/sdk/resources/webhooks";
 
 interface LinqWebhookEnvelope {
   api_version: string;
@@ -31,6 +34,7 @@ export interface LocationSharingStoppedWebhookEvent
 
 export type TavraLinqWebhookEvent =
   | MessageReceivedWebhookEvent
+  | ReactionAddedWebhookEvent
   | LocationSharingStartedWebhookEvent
   | LocationSharingStoppedWebhookEvent;
 
@@ -54,4 +58,21 @@ export function isLocationSharingStoppedEvent(
   event: TavraLinqWebhookEvent,
 ): event is LocationSharingStoppedWebhookEvent {
   return event.event_type === "location.sharing.stopped";
+}
+
+export function isReactionAddedEvent(
+  event: TavraLinqWebhookEvent,
+): event is ReactionAddedWebhookEvent {
+  return event.event_type === "reaction.added";
+}
+
+export function isThumbsUpReaction(
+  event: ReactionAddedWebhookEvent,
+): boolean {
+  if (event.data.reaction_type === "like") return true;
+  if (event.data.reaction_type !== "custom") return false;
+  const emoji = event.data.custom_emoji
+    ?.replace(/\uFE0F/g, "")
+    .replace(/[\u{1F3FB}-\u{1F3FF}]/gu, "");
+  return emoji === "👍";
 }

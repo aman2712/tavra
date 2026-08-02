@@ -2,10 +2,53 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  createOfficialMerchantProductMedia,
   createProductMediaResolver,
   DEMO_PRODUCT_MEDIA_ASSETS,
   resolveCheckoutCardMedia,
 } from "../src/product-media.js";
+
+test("builds exact live-catalog presentation metadata without inventing media", () => {
+  const media = createOfficialMerchantProductMedia({
+    productRef: "ucp:merchant.example:variant_42",
+    lineItemDescription: "Everyday crew T-shirt, size M",
+    imageUrl: "https://cdn.merchant.example/catalog/variant_42.webp",
+    imageDescription: "Navy crew-neck T-shirt",
+    merchantName: "Merchant Example",
+    mediaUrlAllowed: (url) => url.hostname === "cdn.merchant.example",
+  });
+
+  assert.ok(media);
+  assert.equal(media.url, "https://cdn.merchant.example/catalog/variant_42.webp");
+  assert.equal(media.source.kind, "official_merchant_asset");
+  assert.equal(media.source.label, "Merchant Example");
+  assert.match(media.caption, /Everyday crew T-shirt, size M/);
+  assert.doesNotMatch(media.caption, /sandbox/i);
+});
+
+test("suppresses malformed or untrusted live-catalog image URLs", () => {
+  const common = {
+    productRef: "ucp:merchant.example:variant_42",
+    lineItemDescription: "Everyday crew T-shirt, size M",
+    merchantName: "Merchant Example",
+  } as const;
+
+  assert.equal(
+    createOfficialMerchantProductMedia({
+      ...common,
+      imageUrl: "http://cdn.merchant.example/variant_42.webp",
+    }),
+    null,
+  );
+  assert.equal(
+    createOfficialMerchantProductMedia({
+      ...common,
+      imageUrl: "https://lookalike.example/variant_42.webp",
+      mediaUrlAllowed: (url) => url.hostname === "cdn.merchant.example",
+    }),
+    null,
+  );
+});
 
 test("resolves media only for the exact proposed line items and preserves order", () => {
   const resolver = createProductMediaResolver({
@@ -42,7 +85,7 @@ test("resolves media only for the exact proposed line items and preserves order"
     ],
   );
   assert.match(resolution.items[0]?.caption ?? "", /Basic trousers, 32x30/);
-  assert.match(resolution.items[0]?.caption ?? "", /Illustrative sandbox image/);
+  assert.match(resolution.items[0]?.caption ?? "", /Recovery item preview/);
   assert.match(resolution.items[0]?.altText ?? "", /Proposed item: Basic trousers, 32x30/);
   assert.equal(
     resolution.items.some((item) => item.productRef === "b-shirt-001"),
@@ -177,4 +220,82 @@ test("keeps live merchant catalog media URL-driven and allowlistable", () => {
     resolution.items[0]?.caption ?? "",
     /illustrative sandbox/i,
   );
+});
+
+test("renders exact merchant media carried by a discovered checkout product", () => {
+  const resolver = createProductMediaResolver({
+    publicBaseUrl: "https://tavra.example",
+    liveMediaUrlAllowed: (url) => url.hostname === "cdn.shopify.com",
+  });
+
+  const resolution = resolver.resolve([
+    {
+      productRef: "shopify-variant-46624128270499",
+      description: "Sensodyne Deep Clean Gel Toothpaste - 75ml",
+      unitPrice: "47.81",
+      quantity: 1,
+      imageUrl: "https://cdn.shopify.com/files/toothpaste.jpg",
+      merchantName: "Meddu",
+      merchantUrl: "https://meddu.com/",
+    },
+  ]);
+
+  assert.equal(resolution.complete, true);
+  assert.equal(
+    resolution.items[0]?.url,
+    "https://cdn.shopify.com/files/toothpaste.jpg",
+  );
+  assert.equal(resolution.items[0]?.source.kind, "official_merchant_asset");
+  assert.equal(resolution.items[0]?.source.label, "Meddu");
+});
+
+test("does not render a discovered merchant image that fails the runtime allowlist", () => {
+  const resolver = createProductMediaResolver({
+    publicBaseUrl: "https://tavra.example",
+    liveMediaUrlAllowed: (url) => url.hostname === "cdn.shopify.com",
+  });
+
+  const resolution = resolver.resolve([
+    {
+      productRef: "shopify-variant-46624128270499",
+      description: "Sensodyne Deep Clean Gel Toothpaste - 75ml",
+      unitPrice: "47.81",
+      quantity: 1,
+      imageUrl: "https://images.attacker.invalid/toothpaste.jpg",
+      merchantName: "Meddu",
+      merchantUrl: "https://meddu.com/",
+    },
+  ]);
+
+  assert.equal(resolution.complete, false);
+  assert.equal(resolution.items.length, 0);
+  assert.equal(resolution.missing[0]?.reason, "untrusted_media_url");
+});
+
+test("keeps the exact merchant hero when a shipping line has no image", () => {
+  const resolver = createProductMediaResolver({
+    publicBaseUrl: "https://tavra.example",
+    liveMediaUrlAllowed: (url) => url.hostname === "cdn.shopify.com",
+  });
+  const media = resolveCheckoutCardMedia(resolver, [
+    {
+      productRef: "shopify-variant-46624128270499",
+      description: "Sensodyne Deep Clean Gel Toothpaste - 75ml",
+      unitPrice: "47.81",
+      quantity: 1,
+      imageUrl: "https://cdn.shopify.com/files/toothpaste.jpg",
+      merchantName: "Meddu",
+      merchantUrl: "https://meddu.com/",
+    },
+    {
+      productRef: "meddu-fulfillment",
+      description: "Merchant shipping and tax",
+      unitPrice: "16.00",
+      quantity: 1,
+    },
+  ]);
+
+  assert.equal(media.length, 1);
+  assert.equal(media[0]?.source.kind, "official_merchant_asset");
+  assert.equal(media[0]?.url, "https://cdn.shopify.com/files/toothpaste.jpg");
 });
