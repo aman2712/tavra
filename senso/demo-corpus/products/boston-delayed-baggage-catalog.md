@@ -28,6 +28,10 @@ Items:
 
 Items:
 
-- Neutral basic shirt, size M, new — $54.00
-- Basic trousers, waist 32, inseam 30 or 32, new — $78.00
-- Essential toiletry kit, new — $22.00
+- Neutral basic shirt, size M, new - $54.00. Illustrative media: `/checkout-assets/products/b-shirt-001.png`.
+- Basic trousers, waist 32, inseam 30 or 32, new - $78.00. Illustrative media: `/checkout-assets/products/b-trouser-001.png`.
+- Essential toiletry kit, new - $22.00. Illustrative media: `/checkout-assets/products/b-toiletry-001.png`.
+
+Media is keyed by the exact SKU and is illustrative sandbox content. Tavra must
+send only the media records belonging to the line items in the proposed option;
+it must not substitute the old bundle image for a missing SKU asset.

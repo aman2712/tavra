@@ -1,0 +1,5 @@
+// Copy this file to Local.xcconfig. Never put a Prava or Linq secret here.
+TAVRA_APP_BUNDLE_ID = com.yourcompany.tavra
+TAVRA_MESSAGES_BUNDLE_ID = com.yourcompany.tavra.MessagesExtension
+TAVRA_DEVELOPMENT_TEAM = A1B2C3D4E5
+TAVRA_CHECKOUT_HOST = your-public-tavra-host.example

@@ -1,0 +1,7 @@
+// Safe defaults. Override these in an untracked Local.xcconfig for device builds.
+TAVRA_APP_BUNDLE_ID = com.example.tavra
+TAVRA_MESSAGES_BUNDLE_ID = com.example.tavra.MessagesExtension
+TAVRA_DEVELOPMENT_TEAM =
+TAVRA_CHECKOUT_HOST = tavra.example
+
+#include? "Local.xcconfig"

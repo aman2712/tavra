@@ -20,9 +20,45 @@
       "bundle_id": "bundle_b_154",
       "quoted_total": 154.0,
       "items": [
-        {"sku": "b-shirt-001", "category": "basic_clothing", "variant": "neutral-M", "condition": "new", "price": 54.0},
-        {"sku": "b-trouser-001", "category": "basic_clothing", "variant": "32x30-or-32x32", "condition": "new", "price": 78.0},
-        {"sku": "b-toiletry-001", "category": "toiletries", "variant": "essential-kit", "condition": "new", "price": 22.0}
+        {
+          "sku": "b-shirt-001",
+          "category": "basic_clothing",
+          "variant": "neutral-M",
+          "condition": "new",
+          "price": 54.0,
+          "media": {
+            "public_path": "/checkout-assets/products/b-shirt-001.png",
+            "source_kind": "synthetic_demo_asset",
+            "illustrative": true,
+            "alt_text": "Neutral basic crew-neck T-shirt on a plain background"
+          }
+        },
+        {
+          "sku": "b-trouser-001",
+          "category": "basic_clothing",
+          "variant": "32x30-or-32x32",
+          "condition": "new",
+          "price": 78.0,
+          "media": {
+            "public_path": "/checkout-assets/products/b-trouser-001.png",
+            "source_kind": "synthetic_demo_asset",
+            "illustrative": true,
+            "alt_text": "Basic neutral trousers on a plain background"
+          }
+        },
+        {
+          "sku": "b-toiletry-001",
+          "category": "toiletries",
+          "variant": "essential-kit",
+          "condition": "new",
+          "price": 22.0,
+          "media": {
+            "public_path": "/checkout-assets/products/b-toiletry-001.png",
+            "source_kind": "synthetic_demo_asset",
+            "illustrative": true,
+            "alt_text": "Travel-size essential toiletry kit on a plain background"
+          }
+        }
       ],
       "eligible": true,
       "selection_condition": "Employee confirms trouser inseam and final total remains within authorization"

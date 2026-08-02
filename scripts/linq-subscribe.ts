@@ -7,7 +7,11 @@ import { setDotEnvValue } from "./env-file.js";
 const config = loadLinqApiConfig();
 const client = createLinqClient(config);
 const target = new URL("/webhooks/linq?version=2026-02-03", loadPublicBaseUrl());
-const subscribedEvents = ["message.received"] as const;
+const subscribedEvents = [
+  "message.received",
+  "location.sharing.started",
+  "location.sharing.stopped",
+] as const;
 const subscriptions = (await client.webhookSubscriptions.list()).subscriptions;
 const existing =
   subscriptions.find(

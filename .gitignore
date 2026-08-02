@@ -1,7 +1,14 @@
 .DS_Store
 .env
 senso/demo-config/identity-map.local.json
+senso/demo-config/*.local.md
 node_modules/
 dist/
+web-dist/
 data/*.jsonl
 *.log
+ios/TavraMessages/Config/Local.xcconfig
+ios/TavraMessages/TavraMessages.xcodeproj/
+ios/TavraMessages/DerivedData/
+ios/TavraMessagesCore/.build/
+ios/TavraMessagesCore/.swiftpm/

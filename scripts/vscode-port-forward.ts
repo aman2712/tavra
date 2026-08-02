@@ -4,6 +4,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { loadPublicBaseUrl } from "../src/config.js";
 import {
   findTunnelIdForTarget,
+  isDevTunnelAuthenticationError,
   parseDevTunnelTarget,
   type DevTunnelDescription,
 } from "../src/dev-tunnel.js";
@@ -44,6 +45,19 @@ function jsonCommand<T>(cli: string, args: string[]): T {
   return JSON.parse(result.stdout) as T;
 }
 
+function signIn(cli: string): void {
+  console.log("Dev Tunnels login expired. Opening GitHub sign-in now...");
+  const result = spawnSync(cli, ["user", "login", "-g"], {
+    stdio: "inherit",
+  });
+  if (result.status !== 0) {
+    throw new Error(
+      `Dev Tunnels sign-in did not finish. Run '${cli} user login -g' and retry.`,
+    );
+  }
+  console.log("Dev Tunnels sign-in complete. Resuming Tavra startup.");
+}
+
 const port = Number(process.env.PORT || "3000");
 if (!Number.isInteger(port) || port < 1 || port > 65_535) {
   throw new Error("PORT must be an integer between 1 and 65535");
@@ -53,16 +67,30 @@ const target = parseDevTunnelTarget(loadPublicBaseUrl(), port);
 const cli = executable();
 const login = spawnSync(cli, ["user", "show"], { encoding: "utf8" });
 const loginOutput = `${login.stdout}\n${login.stderr}`;
-if (login.status !== 0 || /not logged in/i.test(loginOutput)) {
+if (isDevTunnelAuthenticationError(loginOutput)) {
+  signIn(cli);
+} else if (login.status !== 0) {
   throw new Error(
-    `Dev Tunnels is not signed in. Run '${cli} user login -g' once, then retry.`,
+    login.stderr.trim() ||
+      login.stdout.trim() ||
+      "Dev Tunnels account check failed.",
   );
 }
 
-const listed = jsonCommand<{ tunnels: Array<{ tunnelId: string }> }>(cli, [
-  "list",
-  "-j",
-]);
+let listed: { tunnels: Array<{ tunnelId: string }> };
+try {
+  listed = jsonCommand(cli, ["list", "-j"]);
+} catch (error) {
+  if (
+    error instanceof Error &&
+    isDevTunnelAuthenticationError(error.message)
+  ) {
+    signIn(cli);
+    listed = jsonCommand(cli, ["list", "-j"]);
+  } else {
+    throw error;
+  }
+}
 const descriptions = listed.tunnels.map(({ tunnelId }) =>
   jsonCommand<{ tunnel: DevTunnelDescription }>(cli, ["show", tunnelId, "-j"])
     .tunnel,

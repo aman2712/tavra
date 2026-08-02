@@ -5,10 +5,15 @@
   "type": "module",
   "description": "Message-native travel recovery with concise OpenAI-powered iMessage replies.",
   "scripts": {
+    "predev": "npm run build:web",
     "dev": "tsx watch src/server.ts",
-    "build": "tsc -p tsconfig.json",
+    "build:web": "vite build",
+    "prepreview:payment": "npm run build:web",
+    "preview:payment": "vite preview --host 127.0.0.1 --port 4173 --strictPort --open \"/checkout-assets/?preview=1\"",
+    "build": "npm run build:web && tsc -p tsconfig.json",
     "start": "node dist/src/server.js",
     "dev:imessage": "tsx scripts/dev-imessage.ts",
+    "pretest": "npm run build:web",
     "test": "node --import tsx --test test/**/*.test.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "env:set-public-url": "tsx scripts/set-public-base-url.ts",
@@ -16,6 +21,11 @@
     "linq:subscribe": "tsx scripts/linq-subscribe.ts",
     "smoke:webhook": "tsx scripts/smoke-webhook.ts",
     "smoke:openai": "tsx scripts/smoke-openai.ts",
+    "smoke:senso-openai": "tsx scripts/smoke-senso-openai.ts",
+    "smoke:prava": "tsx scripts/smoke-prava.ts",
+    "senso:sync-profile": "tsx scripts/senso-sync-private-profile.ts",
+    "ios:messages:generate": "bash ios/TavraMessages/generate-project.sh",
+    "test:ios": "swift test --package-path ios/TavraMessagesCore",
     "tunnel:vscode": "tsx scripts/vscode-port-forward.ts",
     "tunnel:vscode:check": "tsx scripts/vscode-port-forward.ts --check"
   },
@@ -24,6 +34,7 @@
   },
   "dependencies": {
     "@linqapp/sdk": "^0.32.1",
+    "@prava-sdk/core": "^0.1.2",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
     "openai": "^7.3.0"
@@ -32,6 +43,7 @@
     "@types/express": "^5.0.6",
     "@types/node": "^26.1.2",
     "tsx": "^4.23.1",
-    "typescript": "^7.0.2"
+    "typescript": "^7.0.2",
+    "vite": "^8.2.0"
   }
 }

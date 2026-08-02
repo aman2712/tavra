@@ -12,6 +12,12 @@ export interface DevTunnelDescription {
   }>;
 }
 
+export function isDevTunnelAuthenticationError(output: string): boolean {
+  return /login (?:is )?required|not logged in|login token expired|authentication[^\n]*expired|unauthorized/i.test(
+    output,
+  );
+}
+
 export function parseDevTunnelTarget(
   publicUrl: URL,
   expectedPort: number,

@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#f8f7f3" />
+    <meta name="color-scheme" content="light" />
+    <title>Secure checkout | Tavra</title>
+  </head>
+  <body>
+    <div class="shell">
+      <header class="topbar" aria-label="Tavra secure checkout">
+        <a class="brand" href="/" aria-label="Tavra home">
+          <span class="brand-mark" aria-hidden="true">t</span>
+          <span>Tavra</span>
+        </a>
+        <div class="secure-label">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M7.5 10V7.5a4.5 4.5 0 0 1 9 0V10m-10 0h11a1.5 1.5 0 0 1 1.5 1.5v7A1.5 1.5 0 0 1 17.5 20h-11A1.5 1.5 0 0 1 5 18.5v-7A1.5 1.5 0 0 1 6.5 10Z" />
+          </svg>
+          Secure approval
+        </div>
+      </header>
+
+      <main class="checkout" id="checkout-root">
+        <section class="summary" aria-labelledby="summary-title">
+          <p class="eyebrow">Baggage recovery</p>
+          <h1 id="summary-title">One last secure step.</h1>
+          <p class="lede">
+            Review the recovery option Tavra prepared, then approve it through Prava.
+            Your card details stay inside Prava’s protected form.
+          </p>
+
+          <div class="order" aria-live="polite">
+            <div class="order-heading">
+              <h2>Recovery option</h2>
+              <span class="status-chip">Within allowance</span>
+            </div>
+            <div id="order-skeleton" class="order-skeleton" aria-label="Loading order">
+              <span></span><span></span><span></span>
+            </div>
+            <ul id="order-items" class="order-items" hidden></ul>
+            <div class="total-row">
+              <span>Total</span>
+              <strong id="order-total">$154.00</strong>
+            </div>
+          </div>
+
+          <div class="trust-note">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M12 3 5.5 5.8v5.4c0 4.4 2.7 7.7 6.5 9.8 3.8-2.1 6.5-5.4 6.5-9.8V5.8L12 3Z" />
+              <path d="m9.3 12 1.8 1.8 3.8-4" />
+            </svg>
+            <p><strong>Tavra never sees your card number.</strong> First-time setup adds a passkey. Repeat approvals use your saved card and biometrics.</p>
+          </div>
+        </section>
+
+        <section class="payment" aria-labelledby="payment-title">
+          <div class="payment-heading">
+            <div>
+              <p class="step-label">Secure payment</p>
+              <h2 id="payment-title">Approve with Prava</h2>
+            </div>
+            <span id="session-timer" class="session-timer" aria-live="polite"></span>
+          </div>
+
+          <div id="loading-state" class="loading-state" aria-live="polite">
+            <div class="loading-line wide"></div>
+            <div class="loading-line"></div>
+            <div class="loading-block"></div>
+            <p>Preparing your protected session…</p>
+          </div>
+
+          <div id="error-state" class="state-message error-state" role="alert" hidden>
+            <span class="state-icon" aria-hidden="true">!</span>
+            <h3>We couldn’t open the secure session.</h3>
+            <p id="error-message">The link may have expired. Ask Tavra for a fresh one.</p>
+            <button id="retry-button" class="button primary" type="button">Try again</button>
+          </div>
+
+          <div id="success-state" class="state-message success-state" aria-live="polite" hidden>
+            <span class="state-icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24"><path d="m6.5 12.5 3.4 3.4 7.6-8" /></svg>
+            </span>
+            <p class="eyebrow">Approval complete</p>
+            <h3>Secure approval complete.</h3>
+            <p>Tavra is updating your iMessage thread. No raw card details were shared, and no live merchant order or charge was created in this sandbox flow.</p>
+            <p class="return-hint">You can return to Messages now.</p>
+          </div>
+
+          <div id="card-stage" hidden>
+            <div id="prava-card-form" class="prava-frame" aria-label="Prava secure card form"></div>
+            <div class="payment-footer">
+              <p id="payment-status" role="status">Waiting for secure approval</p>
+              <button id="cancel-button" class="button quiet" type="button">Cancel</button>
+            </div>
+          </div>
+        </section>
+      </main>
+
+      <footer>
+        <span>Sandbox checkout</span>
+        <span>Secured by Prava</span>
+      </footer>
+    </div>
+    <script type="module" src="/main.ts"></script>
+  </body>
+</html>

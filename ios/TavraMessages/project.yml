@@ -1,0 +1,106 @@
+name: TavraMessages
+
+options:
+  minimumXcodeGenVersion: 2.42.0
+  deploymentTarget:
+    iOS: "17.0"
+  developmentLanguage: en
+  projectFormat: xcode16_0
+  xcodeVersion: "2600"
+
+configs:
+  Debug: debug
+  Release: release
+
+packages:
+  TavraMessagesCore:
+    path: ../TavraMessagesCore
+
+settings:
+  base:
+    CURRENT_PROJECT_VERSION: 3
+    MARKETING_VERSION: 0.1.0
+    SWIFT_VERSION: 6.0
+    SWIFT_STRICT_CONCURRENCY: complete
+    CODE_SIGN_STYLE: Automatic
+    DEVELOPMENT_TEAM: $(TAVRA_DEVELOPMENT_TEAM)
+
+targets:
+  TavraMessages:
+    type: application.messages
+    platform: iOS
+    configFiles:
+      Debug: Config/Shared.xcconfig
+      Release: Config/Shared.xcconfig
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(TAVRA_APP_BUNDLE_ID)
+        PRODUCT_NAME: Tavra
+        TARGETED_DEVICE_FAMILY: "1,2"
+    info:
+      path: App/Info.plist
+      properties:
+        CFBundleDisplayName: Tavra
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        LSRequiresIPhoneOS: true
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+    dependencies:
+      - target: TavraMessagesExtension
+        embed: true
+
+  TavraMessagesExtension:
+    type: app-extension.messages
+    platform: iOS
+    sources:
+      - Extension
+    configFiles:
+      Debug: Config/Shared.xcconfig
+      Release: Config/Shared.xcconfig
+    settings:
+      base:
+        APPLICATION_EXTENSION_API_ONLY: true
+        ENABLE_DEBUG_DYLIB: false
+        PRODUCT_BUNDLE_IDENTIFIER: $(TAVRA_MESSAGES_BUNDLE_ID)
+        PRODUCT_MODULE_NAME: TavraMessagesExtension
+        PRODUCT_NAME: TavraMessagesExtension
+        SKIP_INSTALL: true
+        TARGETED_DEVICE_FAMILY: "1,2"
+    info:
+      path: Extension/Info.plist
+      properties:
+        CFBundleDisplayName: Tavra
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        TavraAllowedCheckoutHosts:
+          - $(TAVRA_CHECKOUT_HOST)
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.message-payload-provider
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).MessagesViewController
+    dependencies:
+      - package: TavraMessagesCore
+      - sdk: Messages.framework
+      - sdk: SafariServices.framework
+
+schemes:
+  TavraMessages:
+    build:
+      targets:
+        TavraMessages: all
+        TavraMessagesExtension: all
+    run:
+      config: Debug
+      executable: TavraMessagesExtension
+      macroExpansion: TavraMessagesExtension
+      askForAppToLaunch: true
+      launchAutomaticallySubstyle: "2"
+    archive:
+      config: Release

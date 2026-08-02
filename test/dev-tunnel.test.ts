@@ -3,8 +3,16 @@ import test from "node:test";
 
 import {
   findTunnelIdForTarget,
+  isDevTunnelAuthenticationError,
   parseDevTunnelTarget,
 } from "../src/dev-tunnel.js";
+
+test("recognizes expired and missing Dev Tunnels authentication", () => {
+  assert.equal(isDevTunnelAuthenticationError("Login token expired."), true);
+  assert.equal(isDevTunnelAuthenticationError("Error: Login required."), true);
+  assert.equal(isDevTunnelAuthenticationError("You are not logged in"), true);
+  assert.equal(isDevTunnelAuthenticationError("Tunnel not found"), false);
+});
 
 test("parses a VS Code forwarded-port URL", () => {
   assert.deepEqual(
