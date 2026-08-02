@@ -62,7 +62,7 @@ flowchart LR
 
 ### A real iMessage app extension
 
-Tavra includes a signed native Messages extension written in Swift. It opens inside Messages, renders an itemized Apple Wallet-like review, shows the selected product image, and follows the checkout status. Prava and issuer verification open in `SFSafariViewController` so the secure origin remains visible and protected.
+Tavra includes a native Messages extension written in Swift and signed by Xcode when it is installed. It opens inside Messages, renders an itemized Apple Wallet-like review, shows the selected product image, and follows the checkout status. Prava and issuer verification open in `SFSafariViewController` so the secure origin remains visible and protected.
 
 The extension is optional. Without it, Tavra falls back to a normal secure link.
 
@@ -81,7 +81,7 @@ Image reading, location retrieval, OpenAI, and payment polling finish at differe
 
 ### AI for ambiguity, code for consequences
 
-The model can understand phrases such as "looks good" or extract a baggage reference from an image. It cannot choose an unverified product, invent a delivery promise, spend money, or mark approval as an order. Every consequential state transition is checked in code and stored durably in SQLite.
+The model can understand phrases such as "looks good" or extract a baggage reference from an image. It cannot choose an unverified product, invent a delivery promise, spend money, or mark approval as an order. Every consequential state transition is checked in code. Conversation and checkout workflows are stored in SQLite, while recovery evidence is kept in a permission-restricted JSONL ledger.
 
 ### Product images are bound to the selected offer
 
